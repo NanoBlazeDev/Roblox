@@ -1334,11 +1334,20 @@ do
 		state.active = false
 	end
 
-	sec:Toggle("fastmine_on", { Label = "enable", Default = false,
+	local fmToggle = sec:Toggle("fastmine_on", { Label = "enable", Default = false,
 		Callback = function(v)
 			if v then enable(); notify("fastmine on", "x" .. state.mult, "success")
 			else disable() end
 		end })
+	-- expose so autoload can re-apply the hook after a silent LoadConfig
+	-- (LoadConfig restores toggle state but skips the Callback → hook not set)
+	bag.hooks.pick_resync = function()
+		if fmToggle:Get() and not state.active then
+			enable()
+		elseif not fmToggle:Get() and state.active then
+			disable()
+		end
+	end
 	sec:Number("fastmine_mult", { Label = "time multiplier (lower = faster)",
 		Default = 0.75, Min = 0.1, Max = 1.0, Step = 0.05,
 		Callback = function(v) state.mult = v; if state.active then disable() enable() end end })
@@ -1431,22 +1440,42 @@ end
 --  AUTO LOAD + AUTO SAVE
 -- ============================================================
 do
-	-- try to load saved config right after module is built (deferred so controls exist)
+	-- gate autosave on load completion so we never save default values on
+	-- top of a user's saved config before LoadConfig has run.
+	local loadDone  = false
+	local loadOk    = false
+	local lastDump  = nil  -- seeded from POST-load state, not ""
+
 	task.defer(function()
-		local ok = pcall(function() mod.Window:LoadConfig(CFG_NAME) end)
-		if ok then notify("config", "loaded " .. CFG_NAME, "info") end
+		loadOk = pcall(function() mod.Window:LoadConfig(CFG_NAME) end)
+		if loadOk then notify("config", "loaded " .. CFG_NAME, "info") end
+		-- LoadConfig is silent → control Callbacks don't fire → side-effect
+		-- hooks (fastmine hookfunction, future ones) never get applied even
+		-- though the toggle visually shows ON. Resync them here.
+		for name, fn in pairs(bag.hooks) do
+			if name:sub(-7) == "_resync" then pcall(fn) end
+		end
+		-- seed baseline AFTER load so autosave only fires on genuine changes.
+		local ok, cur = pcall(function() return HS:JSONEncode(mod.Window:GetConfig()) end)
+		if ok then lastDump = cur end
+		loadDone = true
 	end)
 
-	-- auto-save loop: every 3s, if config state changed since last save, save it
 	bag.flags.autosaveAlive = true
-	local lastDump = ""
 	task.spawn(function()
-		task.wait(2)  -- let LoadConfig settle first
 		while bag.flags.autosaveAlive and _G.__umtSession == SESSION do
 			task.wait(3)
-			local ok, cur = pcall(function()
-				return HS:JSONEncode(mod.Window:GetConfig())
-			end)
+			-- never save until LoadConfig has run — otherwise a defaults
+			-- snapshot can overwrite the user's good saved config.
+			if not loadDone then continue end
+			-- also skip if load failed AND no file existed (lastDump nil):
+			-- without a baseline we can't tell "no changes" from "fresh".
+			if lastDump == nil then
+				local ok, cur = pcall(function() return HS:JSONEncode(mod.Window:GetConfig()) end)
+				if ok then lastDump = cur end
+				continue
+			end
+			local ok, cur = pcall(function() return HS:JSONEncode(mod.Window:GetConfig()) end)
 			if ok and cur ~= lastDump then
 				lastDump = cur
 				pcall(function() mod.Window:SaveConfig(CFG_NAME) end)
@@ -1455,9 +1484,12 @@ do
 	end)
 
 	-- also save on module unload so last state survives even without 3s tick
+	-- BUT only if LoadConfig completed — otherwise we might flush defaults.
 	mod:OnUnload(function()
 		bag.flags.autosaveAlive = false
-		pcall(function() mod.Window:SaveConfig(CFG_NAME) end)
+		if loadDone and lastDump ~= nil then
+			pcall(function() mod.Window:SaveConfig(CFG_NAME) end)
+		end
 	end)
 end
 
