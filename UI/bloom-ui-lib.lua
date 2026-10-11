@@ -3668,15 +3668,20 @@ function Window:Notify(o)
 	-- expand to fit. No truncation unless the user explicitly set Truncate.
 	local TextService = game:GetService("TextService")
 	local innerW = W - 100  -- width available for text (card minus icon + close)
-	local function measure(text, size)
+	local function measure(text, size, font)
 		if not text or text == "" then return 0 end
 		local ok, v = pcall(function()
-			return TextService:GetTextSize(text, size, Enum.Font.Gotham, Vector2.new(innerW, 10000))
+			return TextService:GetTextSize(text, size, font or Enum.Font.Gotham, Vector2.new(innerW, 10000))
 		end)
 		return ok and v.Y or size + 4
 	end
-	local titleH = math.max(20, measure(o.Title or "", 14))
-	local bodyH  = o.Text and measure(o.Text, 12) or 0
+	-- body renders in RobotoMono which is noticeably wider than Gotham, so
+	-- measure with the matching font or we underestimate wrap height and
+	-- the 2nd line gets clipped (e.g. ending at a colon).
+	local titleH = math.max(20, measure(o.Title or "", 14, Enum.Font.Gotham))
+	local bodyH  = o.Text and measure(o.Text, 12, Enum.Font.RobotoMono) or 0
+	-- +1 line of slack so an off-by-one measurement never clips text
+	if o.Text then bodyH = bodyH + 14 end
 	local H
 	if o.Text then
 		H = math.max(62, 20 + titleH + bodyH)  -- 11 top + title + 4 gap + body + 5 bottom
@@ -4092,13 +4097,74 @@ function Window:_registerModule(o)
 	local m = setmetatable({
 		Window = self, Name = name, Version = o.Version or "", Author = o.Author or "",
 		Description = o.Description or "", Icon = o.Icon, Enabled = true, Tabs = {},
-		_conns = {}, _on = { Enable = {}, Disable = {}, Unload = {} }, LoadedAt = os.clock(),
+		_conns = {}, _on = { Enable = {}, Disable = {}, Unload = {}, ConfigLoaded = {} }, LoadedAt = os.clock(),
 	}, Module)
 	m.Group = self:_group(name, { Module = m })
 	table.insert(self.Modules, m)
 	self:_refreshModulesPage()
 	if o.Announce then self:Notify({ Title = "module loaded", Text = name, Kind = "info" }) end
+
+	-- AutoConfig: Bloom owns the LoadConfig + autosave lifecycle so scripts
+	-- don't reinvent it (and don't race each other's config file). Opt in
+	-- via o.AutoConfig = "slot_name" or AutoConfig = true (uses module name).
+	if o.AutoConfig then
+		local slot = (type(o.AutoConfig) == "string") and o.AutoConfig
+			or name:lower():gsub("%s+", "_")
+		m._autoConfigSlot = slot
+		m:_startAutoConfig()
+	end
 	return m
+end
+
+-- Autosave + load lifecycle owned by Bloom. Guards:
+--  * never save until LoadConfig has run (so defaults can't clobber saves)
+--  * baseline seeded from POST-load state (not "")
+--  * loop stops when the module unloads
+function Module:_startAutoConfig()
+	local HS = game:GetService("HttpService")
+	local slot = self._autoConfigSlot
+	local win = self.Window
+	local loadDone, lastDump = false, nil
+	self._autoConfigAlive = true
+
+	task.defer(function()
+		local ok = pcall(function() win:LoadConfig(slot) end)
+		-- fire OnConfigLoaded hooks so modules can resync side-effect toggles
+		-- (fastmine hookfunction, etc.) that LoadConfig's silent apply skipped
+		for _, fn in self._on.ConfigLoaded do pcall(fn, ok) end
+		local okE, cur = pcall(function() return HS:JSONEncode(win:GetConfig()) end)
+		if okE then lastDump = cur end
+		loadDone = true
+	end)
+
+	task.spawn(function()
+		while self._autoConfigAlive and not self._unloaded do
+			task.wait(3)
+			if not loadDone then continue end
+			if lastDump == nil then
+				local ok, cur = pcall(function() return HS:JSONEncode(win:GetConfig()) end)
+				if ok then lastDump = cur end
+				continue
+			end
+			local ok, cur = pcall(function() return HS:JSONEncode(win:GetConfig()) end)
+			if ok and cur ~= lastDump then
+				lastDump = cur
+				pcall(function() win:SaveConfig(slot) end)
+			end
+		end
+	end)
+
+	-- flush on unload, but only if load actually completed
+	self:OnUnload(function()
+		self._autoConfigAlive = false
+		if loadDone and lastDump ~= nil then
+			pcall(function() win:SaveConfig(slot) end)
+		end
+	end)
+end
+
+function Module:OnConfigLoaded(fn)
+	table.insert(self._on.ConfigLoaded, fn); return self
 end
 
 function Module:Tab(o)
