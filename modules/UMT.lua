@@ -400,9 +400,38 @@ do
 		if not state.enabled then return end
 		local perf = vb.PerformanceFolder; if not perf then return end
 		if _G.__umtBoosted[perf] then return end  -- already boosted this session
-		task.wait(0.8)
-		if vb.Model:GetAttribute("DriverId") ~= lp.UserId then return end
-		local pw = perf:GetAttribute("Power"); if not pw then return end
+
+		-- MARK IMMEDIATELY so a second DriverId handler fire can't race in.
+		-- "pending" entry gets replaced with the real entry on success,
+		-- cleared on failure so the user can retry via re-sit.
+		_G.__umtBoosted[perf] = { pending = true }
+
+		-- WAIT FOR VEHICLE TO BE FULLY INITIALIZED.
+		-- Components.Engine + Components.WheeledVehicle both set means
+		-- VehicleBase:InitComponents() has run. On FIRST sit, DriverId
+		-- fires before PetrolEngine's attribute listener is attached, so
+		-- our writes silently don't apply. Poll up to 2s.
+		local ready = false
+		for _ = 1, 40 do
+			if vb.Components and vb.Components.Engine and vb.Components.WheeledVehicle then
+				ready = true; break
+			end
+			task.wait(0.05)
+		end
+		if not ready then
+			_G.__umtBoosted[perf] = nil
+			return
+		end
+
+		-- small settle after init
+		task.wait(0.3)
+		if vb.Model:GetAttribute("DriverId") ~= lp.UserId then
+			_G.__umtBoosted[perf] = nil
+			return
+		end
+
+		local pw = perf:GetAttribute("Power")
+		if not pw then _G.__umtBoosted[perf] = nil; return end
 		local pk = perf:GetAttribute("PeakRevs")
 		local br = perf:GetAttribute("Braking")
 
@@ -452,6 +481,7 @@ do
 
 	local function revertAll()
 		for perf, orig in pairs(_G.__umtBoosted) do
+			if orig.pending then continue end  -- not actually applied yet
 			pcall(function()
 				if perf and perf.Parent then
 					perf:SetAttribute("Power",    orig.Power)
