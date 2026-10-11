@@ -401,29 +401,10 @@ do
 		local perf = vb.PerformanceFolder; if not perf then return end
 		if _G.__umtBoosted[perf] then return end  -- already boosted this session
 
-		-- MARK IMMEDIATELY so a second DriverId handler fire can't race in.
-		-- "pending" entry gets replaced with the real entry on success,
-		-- cleared on failure so the user can retry via re-sit.
+		-- caller (DriverId handler) has already waited for Components.Engine
+		-- and WheeledVehicle to exist. small settle here lets PetrolEngine's
+		-- AttributeChanged listener bind before we write.
 		_G.__umtBoosted[perf] = { pending = true }
-
-		-- WAIT FOR VEHICLE TO BE FULLY INITIALIZED.
-		-- Components.Engine + Components.WheeledVehicle both set means
-		-- VehicleBase:InitComponents() has run. On FIRST sit, DriverId
-		-- fires before PetrolEngine's attribute listener is attached, so
-		-- our writes silently don't apply. Poll up to 2s.
-		local ready = false
-		for _ = 1, 40 do
-			if vb.Components and vb.Components.Engine and vb.Components.WheeledVehicle then
-				ready = true; break
-			end
-			task.wait(0.05)
-		end
-		if not ready then
-			_G.__umtBoosted[perf] = nil
-			return
-		end
-
-		-- small settle after init
 		task.wait(0.3)
 		if vb.Model:GetAttribute("DriverId") ~= lp.UserId then
 			_G.__umtBoosted[perf] = nil
@@ -452,7 +433,9 @@ do
 				if w then
 					local old = w.CustomPhysicalProperties
 					table.insert(entry.Wheels, { Wheel = w, Props = old })
-					local newFriction = (old and old.Friction or 1.2) * state.GRIP_MULT
+					-- Roblox clamps Friction to [0, 2]. Pre-clamp to silence warnings
+					-- and still give the maximum traction allowed.
+					local newFriction = math.clamp((old and old.Friction or 1.2) * state.GRIP_MULT, 0, 2)
 					w.CustomPhysicalProperties = PhysicalProperties.new(
 						old and old.Density or 1,
 						newFriction,
@@ -515,15 +498,21 @@ do
 			if not state.enabled then return end
 			if model:GetAttribute("DriverId") ~= lp.UserId then return end
 			if not VC then return end
-			-- RACE FIX: VC.CurrentDrivenVehicle is set from VC's own DriverId
-			-- handler which may fire AFTER ours. On first sit we'd see nil
-			-- here. Poll briefly (up to ~1s) until the vehicle is resolvable.
+			-- RACE FIX: wait for BOTH (a) VC to resolve the vehicle AND
+			-- (b) the vehicle's Components.Engine + WheeledVehicle to exist
+			-- (meaning InitComponents ran). Newly-spawned vehicles need
+			-- longer than first-ever vehicle — poll up to 3s.
 			task.spawn(function()
 				local vb
-				for _ = 1, 20 do
-					vb = VC.CurrentDrivenVehicle
-					   or (VC.VehiclesByOwnerId and VC.VehiclesByOwnerId[model:GetAttribute("OwnerId")])
-					if vb then break end
+				for _ = 1, 60 do
+					local candidate = VC.CurrentDrivenVehicle
+						or (VC.VehiclesByOwnerId and VC.VehiclesByOwnerId[model:GetAttribute("OwnerId")])
+					if candidate and candidate.Components
+					   and candidate.Components.Engine
+					   and candidate.Components.WheeledVehicle then
+						vb = candidate
+						break
+					end
 					task.wait(0.05)
 				end
 				if vb and model:GetAttribute("DriverId") == lp.UserId then
@@ -1127,5 +1116,5 @@ do
 	end)
 end
 
-print("[UMT] umt toolkit loaded as module — 4 tabs ready")
+print("[UMT] umt toolkit v1.1 loaded — 6 tabs ready")
 notify("umt toolkit", "loaded — 4 tabs", "success")
