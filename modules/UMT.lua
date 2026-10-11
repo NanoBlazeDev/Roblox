@@ -4,8 +4,8 @@
 	Unload the module to deload the whole script cleanly.
 ]]
 
-local BLOOM_URL   = "https://pastebin.com/raw/7TXqfi4h"
-local TOOLKIT_URL = "https://pastebin.com/raw/R2M7QNfe"
+local BLOOM_URL   = "https://raw.githubusercontent.com/NanoBlazeDev/Roblox/refs/heads/main/UI/bloom-ui-lib.lua"
+local TOOLKIT_URL = "https://raw.githubusercontent.com/NanoBlazeDev/Roblox/refs/heads/main/modules/UMT.lua"
 
 if _G.__umtToolkit then pcall(_G.__umtToolkit) end
 _G.__umtToolkit = nil
@@ -42,8 +42,21 @@ end
 local okB, Bloom = pcall(function()
 	return loadstring(game:HttpGet(BLOOM_URL))()
 end)
+local function umtFail(stage, err)
+	local msg = "[UMT] " .. stage .. " failed: " .. tostring(err)
+	warn(msg)
+	print(msg)
+	pcall(function()
+		game:GetService("StarterGui"):SetCore("SendNotification", {
+			Title    = "UMT Toolkit",
+			Text     = stage .. " failed — check console (F9)",
+			Duration = 8,
+		})
+	end)
+end
+
 if not okB or type(Bloom) ~= "table" then
-	warn("[UMT] Bloom load failed: " .. tostring(Bloom))
+	umtFail("Bloom load", Bloom)
 	return
 end
 
@@ -77,12 +90,18 @@ local CFG_NAME = "umt_default"  -- config slot name inside Bloom's shared config
 -- ============================================================
 --  THE MODULE
 -- ============================================================
-local mod = Bloom:Module({
-	Name        = "umt toolkit",
-	Version     = "1.0",
-	Author      = "ExaVolt",
-	Description = "ultimate mining tycoon tools — xray, vehicle boost, fastmine, server hop",
-})
+local okMod, mod = pcall(function()
+	return Bloom:Module({
+		Name        = "umt toolkit",
+		Version     = "1.0",
+		Author      = "ExaVolt",
+		Description = "ultimate mining tycoon tools — ore xray, vehicle boost, fastmine, server hop",
+	})
+end)
+if not okMod or not mod then
+	umtFail("Module registration", mod)
+	return
+end
 
 local function notify(title, text, kind)
 	pcall(function()
@@ -356,88 +375,7 @@ do
 	bag.hooks.xray_unload  = function() bag.flags.xrayAlive = false; bag.flags.hardWatchAlive = false; state.active = false; clear() end
 end
 
--- ============================================================
---  TAB — PLAYER ESP
--- ============================================================
-do
-	local tab = mod:Tab({ Name = "esp" })
-	local sec = tab:Section("players")
-
-	local state = { active = false, radius = 50 }
-	local highlights = {}  -- [player] = Highlight
-
-	local function clearPlayer(p)
-		local h = highlights[p]
-		if h then pcall(function() h:Destroy() end); highlights[p] = nil end
-	end
-	local function clearAll()
-		for p, _ in pairs(highlights) do clearPlayer(p) end
-	end
-
-	local function distTo(char)
-		local myChar = lp.Character; if not myChar then return math.huge end
-		local myHrp = myChar:FindFirstChild("HumanoidRootPart"); if not myHrp then return math.huge end
-		local hrp = char:FindFirstChild("HumanoidRootPart"); if not hrp then return math.huge end
-		return (hrp.Position - myHrp.Position).Magnitude
-	end
-
-	local function ensureHighlight(p, char)
-		if highlights[p] then return highlights[p] end
-		local h = Instance.new("Highlight")
-		h.Name = "UMT_ESP"
-		h.Adornee = char
-		h.FillColor = Color3.fromRGB(255, 90, 120)
-		h.OutlineColor = Color3.fromRGB(255, 255, 255)
-		h.FillTransparency = 0.6
-		h.OutlineTransparency = 0
-		h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-		h.Parent = char
-		highlights[p] = h
-		return h
-	end
-
-	local function refresh()
-		if not state.active then clearAll(); return end
-		for _, p in ipairs(Players:GetPlayers()) do
-			if p == lp then continue end
-			local char = p.Character
-			if not char then clearPlayer(p); continue end
-			local d = distTo(char)
-			if d <= state.radius then
-				ensureHighlight(p, char)
-			else
-				clearPlayer(p)
-			end
-		end
-	end
-
-	sec:Toggle("esp_on", {
-		Label = "esp enabled", Default = false,
-		Callback = function(v)
-			state.active = v
-			if v then refresh(); notify("esp on", "radius " .. state.radius, "success")
-			else clearAll(); notify("esp off", "", "info") end
-		end,
-	})
-	sec:Int("esp_radius", {
-		Label = "radius (studs)", Default = state.radius, Min = 10, Max = 100, Step = 1,
-		Callback = function(v) state.radius = v; if state.active then refresh() end end,
-	})
-
-	bag.flags.espAlive = true
-	task.spawn(function()
-		while bag.flags.espAlive do
-			task.wait(0.4)
-			if state.active then refresh() end
-		end
-	end)
-	-- clean up when players leave
-	mod:Connect(Players.PlayerRemoving, function(p) clearPlayer(p) end)
-
-	bag.hooks.esp_disable = function() state.active = false; clearAll() end
-	bag.hooks.esp_enable  = function() end
-	bag.hooks.esp_unload  = function() bag.flags.espAlive = false; state.active = false; clearAll() end
-end
+-- player ESP removed — the ore xray tab IS the "ore esp"
 
 -- ============================================================
 --  TAB — VEHICLE BOOST
@@ -672,19 +610,16 @@ end
 -- ============================================================
 mod:OnDisable(function()
 	bag.hooks.xray_disable()
-	bag.hooks.esp_disable()
 	bag.hooks.boost_disable()
 	bag.hooks.pick_disable()
 end)
 mod:OnEnable(function()
 	bag.hooks.xray_enable()
-	bag.hooks.esp_enable()
 	bag.hooks.boost_enable()
 	bag.hooks.pick_enable()
 end)
 mod:OnUnload(function()
 	bag.hooks.xray_unload()
-	bag.hooks.esp_unload()
 	bag.hooks.boost_unload()
 	bag.hooks.pick_unload()
 	for _, f in ipairs(bag.folders) do pcall(function() f:Destroy() end) end
