@@ -64,6 +64,7 @@ local RS      = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local TS      = game:GetService("TeleportService")
 local HS      = game:GetService("HttpService")
+local UIS     = game:GetService("UserInputService")
 local Workspace = workspace
 local Terrain = Workspace.Terrain
 local lp      = Players.LocalPlayer
@@ -93,9 +94,9 @@ local CFG_NAME = "umt_default"  -- config slot name inside Bloom's shared config
 local okMod, mod = pcall(function()
 	return Bloom:Module({
 		Name        = "umt toolkit",
-		Version     = "1.0",
+		Version     = "1.1",
 		Author      = "ExaVolt",
-		Description = "ultimate mining tycoon tools — ore xray, vehicle boost, fastmine, server hop",
+		Description = "ultimate mining tycoon tools — ore xray, vehicle boost, waypoints, flinger, fastmine, server hop",
 	})
 end)
 if not okMod or not mod then
@@ -392,7 +393,7 @@ do
 	local state = {
 		enabled    = true,
 		POWER_MULT = 15, PEAK_MULT = 3, BRAKE_MULT = 15,
-		GRIP_MULT  = 2, DOWNFORCE_MULT = 3,  -- grip + downforce for high-speed cornering
+		GRIP_MULT  = 2, DOWNFORCE_MULT = 1,  -- downforce grows with speed² — keep LOW to avoid suspension crush
 	}
 
 	local function boost(vb)
@@ -438,7 +439,10 @@ do
 		local aero = vb.Components and vb.Components.GroundAerodynamics
 		if aero then
 			entry.Aero = { Component = aero, OldDownforce = aero.DownforceCoeff }
-			local base = (aero.DownforceCoeff > 0) and aero.DownforceCoeff or 1
+			-- if stock downforce is 0 (Quadbike by design), inject a small
+			-- baseline so slider > 1 still has some effect. 0.3 keeps the
+			-- suspension-crush at high speed to a reasonable amount.
+			local base = (aero.DownforceCoeff > 0) and aero.DownforceCoeff or 0.3
 			aero.DownforceCoeff = base * state.DOWNFORCE_MULT
 		end
 
@@ -481,9 +485,21 @@ do
 			if not state.enabled then return end
 			if model:GetAttribute("DriverId") ~= lp.UserId then return end
 			if not VC then return end
-			local vb = VC.CurrentDrivenVehicle or (VC.VehiclesByOwnerId
-				and VC.VehiclesByOwnerId[model:GetAttribute("OwnerId")])
-			if vb then task.spawn(boost, vb) end
+			-- RACE FIX: VC.CurrentDrivenVehicle is set from VC's own DriverId
+			-- handler which may fire AFTER ours. On first sit we'd see nil
+			-- here. Poll briefly (up to ~1s) until the vehicle is resolvable.
+			task.spawn(function()
+				local vb
+				for _ = 1, 20 do
+					vb = VC.CurrentDrivenVehicle
+					   or (VC.VehiclesByOwnerId and VC.VehiclesByOwnerId[model:GetAttribute("OwnerId")])
+					if vb then break end
+					task.wait(0.05)
+				end
+				if vb and model:GetAttribute("DriverId") == lp.UserId then
+					boost(vb)
+				end
+			end)
 		end)
 	end
 
@@ -508,7 +524,7 @@ do
 		Callback = function(v) state.BRAKE_MULT = v end })
 	sec:Number("boost_grip", { Label = "grip mult (1 = stock)",     Default = 2, Min = 1, Max = 20, Step = 0.1,
 		Callback = function(v) state.GRIP_MULT = v end })
-	sec:Number("boost_down", { Label = "downforce mult (1 = stock)", Default = 3, Min = 1, Max = 50, Step = 0.1,
+	sec:Number("boost_down", { Label = "downforce mult (grows with speed² — keep ≤2)", Default = 1, Min = 0, Max = 10, Step = 0.1,
 		Callback = function(v) state.DOWNFORCE_MULT = v end })
 	sec:Button("boost_revert", { Text = "revert all vehicles to stock", Danger = true,
 		Callback = function()
@@ -519,6 +535,419 @@ do
 	bag.hooks.boost_disable = function() state.enabled = false; revertAll() end
 	bag.hooks.boost_enable  = function() state.enabled = true end
 	bag.hooks.boost_unload  = function() state.enabled = false; revertAll() end
+end
+
+-- ============================================================
+--  TAB — WAYPOINTS (recall own car + per-key TPs)
+-- ============================================================
+do
+	local HS2 = HS  -- reuse HttpService alias from top
+	local WP_PATH   = "BloomUI/vehicle_waypoints.json"
+	local TP_Y_LIFT = 5
+
+	-- helpers
+	local function myVehicleHere()
+		if not VC then return nil end
+		return VC.CurrentDrivenVehicle
+	end
+	local function myPrimary()
+		local vb = myVehicleHere()
+		return vb and vb.Model and vb.Model.PrimaryPart
+	end
+	local function myHrp()
+		local c = lp.Character
+		return c and c:FindFirstChild("HumanoidRootPart")
+	end
+
+	-- shared anchor-dance teleport
+	local function pivotWithAnchorDance(model, targetCFrame)
+		if not model or not model.PrimaryPart then return false, "no model" end
+		pcall(function()
+			local cache = {}
+			for _, p in ipairs(model:GetDescendants()) do
+				if p:IsA("BasePart") then
+					cache[p] = p.Anchored
+					p.Anchored = true
+				end
+			end
+			model:PivotTo(targetCFrame)
+			for p in pairs(cache) do
+				p.AssemblyLinearVelocity  = Vector3.zero
+				p.AssemblyAngularVelocity = Vector3.zero
+			end
+			game:GetService("RunService").Heartbeat:Wait()
+			game:GetService("RunService").Heartbeat:Wait()
+			for p, was in pairs(cache) do p.Anchored = was end
+		end)
+		return true
+	end
+
+	-- waypoints shape: [name] = { cf = {12 CFrame components}, key = "KeyCodeName" or "" }
+	local waypoints = {}
+
+	local function loadWaypoints()
+		if not (isfile and readfile and isfile(WP_PATH)) then return end
+		local ok, data = pcall(readfile, WP_PATH)
+		if not ok then return end
+		local ok2, parsed = pcall(function() return HS2:JSONDecode(data) end)
+		if ok2 and type(parsed) == "table" then
+			waypoints = parsed
+			-- migrate old flat-array format
+			for name, v in pairs(waypoints) do
+				if type(v) == "table" and v[1] and not v.cf then
+					waypoints[name] = { cf = v, key = "" }
+				end
+			end
+		end
+	end
+
+	local function saveWaypoints()
+		if not writefile then return end
+		pcall(function() writefile(WP_PATH, HS2:JSONEncode(waypoints)) end)
+	end
+
+	local function labelOf(name)
+		local wp = waypoints[name]
+		if wp and wp.key and wp.key ~= "" and wp.key ~= "Unknown" then
+			return name .. "  [" .. wp.key .. "]"
+		end
+		return name
+	end
+
+	local function nameFromLabel(label)
+		if not label or label == "" then return nil end
+		return (label:gsub("%s%s%[.-%]$", ""))
+	end
+
+	local function waypointLabels()
+		local out = {}
+		for name in pairs(waypoints) do table.insert(out, labelOf(name)) end
+		table.sort(out)
+		return out
+	end
+
+	local function teleportTo(name)
+		local wp = waypoints[name]
+		if not wp or not wp.cf then return false, "no such waypoint" end
+		local vb = myVehicleHere(); if not vb then return false, "sit in your car first" end
+		local target = CFrame.new(unpack(wp.cf)) + Vector3.new(0, TP_Y_LIFT, 0)
+		return pivotWithAnchorDance(vb.Model, target)
+	end
+
+	loadWaypoints()
+
+	local tab = mod:Tab({ Name = "waypoints" })
+
+	-- recall section
+	local secRecall = tab:Section("recall my car")
+	local function bringMyCar()
+		local vb = myVehicleHere()
+		if not vb then notify("recall", "no driven vehicle", "error") return end
+		local hrp = myHrp()
+		if not hrp then notify("recall", "no character", "error") return end
+		pivotWithAnchorDance(vb.Model, hrp.CFrame * CFrame.new(0, 3, -8))
+		notify("recalled", "car in front", "success")
+	end
+	secRecall:Button("recall_bring", {
+		Text = "bring my car in front of me",
+		Primary = true,
+		Callback = bringMyCar,
+	})
+	secRecall:Keybind("recall_key", {
+		Label = "recall key",
+		Default = Enum.KeyCode.B,
+		OnPress = bringMyCar,
+	})
+
+	-- new waypoint section
+	local secAdd = tab:Section("new waypoint")
+	local dropdown
+	local keybindCtrl
+
+	local nameInput = secAdd:String("wp_name", {
+		Label = "name", Default = "", Placeholder = "my spot",
+	})
+	secAdd:Button("wp_save", {
+		Text = "save current car position",
+		Primary = true,
+		Callback = function()
+			local name = (nameInput:Get() or ""):gsub("^%s+", ""):gsub("%s+$", "")
+			if name == "" then notify("waypoints", "enter a name first", "error") return end
+			local pp = myPrimary()
+			if not pp then notify("waypoints", "no driven vehicle", "error") return end
+			local prevKey = (waypoints[name] and waypoints[name].key) or ""
+			waypoints[name] = { cf = { pp.CFrame:GetComponents() }, key = prevKey }
+			saveWaypoints()
+			notify("saved", name, "success")
+			if dropdown then
+				dropdown:SetOptions(waypointLabels())
+				dropdown:Set(labelOf(name))
+			end
+		end,
+	})
+
+	-- saved list section
+	local secList = tab:Section("saved waypoints")
+
+	local initial = waypointLabels()
+	if #initial == 0 then initial = { "(none saved)" } end
+
+	dropdown = secList:Enum("wp_pick", {
+		Label = "waypoint", Options = initial, Default = initial[1],
+		Callback = function(label)
+			if not keybindCtrl then return end
+			local name = nameFromLabel(label)
+			local wp = name and waypoints[name]
+			local keyName = wp and wp.key or ""
+			if keyName ~= "" and keyName ~= "Unknown" then
+				local ok, k = pcall(function() return Enum.KeyCode[keyName] end)
+				if ok and k then keybindCtrl:Set(k, true); return end
+			end
+			keybindCtrl:Set(Enum.KeyCode.Unknown, true)
+		end,
+	})
+
+	keybindCtrl = secList:Keybind("wp_set_key", {
+		Label = "key for selected (empty = none)",
+		Default = Enum.KeyCode.Unknown,
+		OnPress = function() end,
+	})
+
+	keybindCtrl.Changed:Connect(function()
+		local sel = dropdown:Get()
+		local name = nameFromLabel(sel)
+		local wp = name and waypoints[name]
+		if not wp then return end
+		local key = keybindCtrl:Get()
+		local keyName = (typeof(key) == "EnumItem" and key.Name) or ""
+		if keyName == "Unknown" then keyName = "" end
+		if wp.key == keyName then return end
+		wp.key = keyName
+		saveWaypoints()
+		dropdown:SetOptions(waypointLabels())
+		dropdown:Set(labelOf(name))
+	end)
+
+	secList:Button("wp_tp", {
+		Text = "teleport to selected",
+		Primary = true,
+		Callback = function()
+			local sel = dropdown:Get()
+			if not sel or sel == "(none saved)" then
+				notify("waypoints", "pick one first", "error") return
+			end
+			local name = nameFromLabel(sel)
+			local ok, err = teleportTo(name)
+			if ok then notify("tp'd", name, "success")
+			else notify("tp failed", err or "?", "error") end
+		end,
+	})
+	secList:Button("wp_delete", {
+		Text = "delete selected",
+		Danger = true,
+		Callback = function()
+			local sel = dropdown:Get()
+			if not sel or sel == "(none saved)" then return end
+			local name = nameFromLabel(sel)
+			if not name then return end
+			waypoints[name] = nil
+			saveWaypoints()
+			local list = waypointLabels()
+			if #list == 0 then list = { "(none saved)" } end
+			dropdown:SetOptions(list)
+			dropdown:Set(list[1])
+			notify("deleted", name, "info")
+		end,
+	})
+	secList:Button("wp_refresh", {
+		Text = "reload from disk",
+		Callback = function()
+			loadWaypoints()
+			local list = waypointLabels()
+			if #list == 0 then list = { "(none saved)" } end
+			dropdown:SetOptions(list)
+			dropdown:Set(list[1])
+			notify("reloaded", #list .. " waypoints", "info")
+		end,
+	})
+
+	-- global quick-tp listener for all waypoint keys
+	mod:Connect(UIS.InputBegan, function(input, gpe)
+		if gpe then return end
+		if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+		local kname = input.KeyCode.Name
+		if kname == "Unknown" then return end
+		for name, wp in pairs(waypoints) do
+			if wp.key == kname then
+				teleportTo(name)
+				break
+			end
+		end
+	end)
+
+	-- expose flinger helpers via upvalue capture for flinger tab below
+	_G.__umtVFHelpers = {
+		myVehicle    = myVehicleHere,
+		myPrimary    = myPrimary,
+		myHrp        = myHrp,
+		pivotDance   = pivotWithAnchorDance,
+	}
+end
+
+-- ============================================================
+--  TAB — FLINGER (fling other players' vehicles via physics)
+-- ============================================================
+do
+	local H = _G.__umtVFHelpers
+	local RunSvc = game:GetService("RunService")
+
+	local flingState = {
+		scanRadius = 100, targetModel = nil, targetLabel = nil,
+		highlight = nil, flinging = false, flingLoop = nil, label2model = {},
+	}
+
+	local function clearHighlight()
+		if flingState.highlight then
+			pcall(function() flingState.highlight:Destroy() end)
+			flingState.highlight = nil
+		end
+	end
+	local function setHighlight(model)
+		clearHighlight()
+		if not model then return end
+		local h = Instance.new("Highlight")
+		h.Name = "UMT_FlingTarget"
+		h.Adornee = model
+		h.FillColor = Color3.fromRGB(255, 50, 70)
+		h.OutlineColor = Color3.fromRGB(255, 255, 255)
+		h.FillTransparency = 0.65
+		h.OutlineTransparency = 0
+		h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		h.Parent = model
+		flingState.highlight = h
+	end
+
+	local function scanNearby()
+		flingState.label2model = {}
+		local hrp = H.myHrp(); if not hrp then return {} end
+		local myPos = hrp.Position
+		local R2 = flingState.scanRadius ^ 2
+		local Veh = Workspace:FindFirstChild("Vehicles")
+		if not Veh then return {} end
+		local hits = {}
+		for _, m in ipairs(Veh:GetChildren()) do
+			if m:IsA("Model") and m.PrimaryPart then
+				local d2 = (m.PrimaryPart.Position - myPos).Magnitude ^ 2
+				if d2 <= R2 then
+					local ownerId  = m:GetAttribute("OwnerId")
+					local driverId = m:GetAttribute("DriverId")
+					if ownerId ~= lp.UserId then
+						local ownerPlr  = ownerId and Players:GetPlayerByUserId(ownerId)
+						local driverPlr = driverId and Players:GetPlayerByUserId(driverId)
+						local who = (driverPlr and driverPlr.Name) or (ownerPlr and ownerPlr.Name) or ("uid:" .. tostring(ownerId or "?"))
+						local label = string.format("%s — %s (%dm)", who, m.Name, math.sqrt(d2))
+						flingState.label2model[label] = m
+						table.insert(hits, { label = label, d2 = d2 })
+					end
+				end
+			end
+		end
+		table.sort(hits, function(a, b) return a.d2 < b.d2 end)
+		local labels = {}
+		for _, h in ipairs(hits) do table.insert(labels, h.label) end
+		return labels
+	end
+
+	local function startFling()
+		if flingState.flinging then return end
+		if not flingState.targetModel then notify("flinger", "pick a target first", "error") return end
+		flingState.flinging = true
+		flingState.flingLoop = RunSvc.Heartbeat:Connect(function()
+			if not flingState.flinging then return end
+			local pp = H.myPrimary()
+			local tgtPP = flingState.targetModel and flingState.targetModel.PrimaryPart
+			if not pp or not tgtPP or not tgtPP.Parent then return end
+			pcall(function()
+				pp.CFrame = tgtPP.CFrame * CFrame.new(0, 2.5, 0)
+				local burst = Vector3.new(
+					math.random(-1, 1) * 1e5,
+					math.random( 0, 1) * 1e5,
+					math.random(-1, 1) * 1e5
+				)
+				pp.AssemblyLinearVelocity  = burst
+				pp.AssemblyAngularVelocity = burst * 0.5
+			end)
+		end)
+		notify("flinging", "attached to " .. (flingState.targetLabel or "?"), "success")
+	end
+	local function stopFling()
+		flingState.flinging = false
+		if flingState.flingLoop then
+			pcall(function() flingState.flingLoop:Disconnect() end)
+			flingState.flingLoop = nil
+		end
+	end
+
+	local tab = mod:Tab({ Name = "flinger" })
+	local secTarget = tab:Section("target")
+
+	local flingDropdown = secTarget:Enum("fling_target", {
+		Label = "target vehicle",
+		Options = { "(none - press scan)" },
+		Default = "(none - press scan)",
+		Callback = function(label)
+			local m = flingState.label2model[label]
+			flingState.targetLabel = m and label or nil
+			flingState.targetModel = m
+			if m then setHighlight(m); notify("locked", label, "info")
+			else clearHighlight() end
+		end,
+	})
+	secTarget:Int("fling_radius", {
+		Label = "scan radius (studs)",
+		Default = flingState.scanRadius, Min = 20, Max = 500, Step = 5,
+		Callback = function(v) flingState.scanRadius = v end,
+	})
+	secTarget:Button("fling_scan", {
+		Text = "scan nearby",
+		Primary = true,
+		Callback = function()
+			local labels = scanNearby()
+			if #labels == 0 then
+				flingDropdown:SetOptions({ "(none in range)" })
+				flingDropdown:Set("(none in range)")
+				notify("no vehicles", "nothing within " .. flingState.scanRadius, "warn")
+				return
+			end
+			flingDropdown:SetOptions(labels)
+			flingDropdown:Set(labels[1])
+			notify("found", #labels .. " vehicles", "success")
+		end,
+	})
+
+	local secFling = tab:Section("fling")
+	local flingToggle = secFling:Toggle("fling_on", {
+		Label = "fling (drive into target first!)",
+		Default = false,
+		Callback = function(v) if v then startFling() else stopFling() end end,
+	})
+	secFling:Button("fling_clear", {
+		Text = "clear target",
+		Danger = true,
+		Callback = function()
+			stopFling()
+			flingToggle:Set(false)
+			flingState.targetModel = nil
+			flingState.targetLabel = nil
+			clearHighlight()
+			flingDropdown:Set("(none - press scan)")
+			notify("cleared", "", "info")
+		end,
+	})
+	secFling:Label("WARNING: visible from server replay. use on moving targets only.")
+
+	bag.hooks.fling_disable = function() stopFling(); clearHighlight() end
+	bag.hooks.fling_unload  = function() stopFling(); clearHighlight() end
 end
 
 -- ============================================================
@@ -612,6 +1041,7 @@ mod:OnDisable(function()
 	bag.hooks.xray_disable()
 	bag.hooks.boost_disable()
 	bag.hooks.pick_disable()
+	if bag.hooks.fling_disable then bag.hooks.fling_disable() end
 end)
 mod:OnEnable(function()
 	bag.hooks.xray_enable()
@@ -622,6 +1052,7 @@ mod:OnUnload(function()
 	bag.hooks.xray_unload()
 	bag.hooks.boost_unload()
 	bag.hooks.pick_unload()
+	if bag.hooks.fling_unload then bag.hooks.fling_unload() end
 	for _, f in ipairs(bag.folders) do pcall(function() f:Destroy() end) end
 	table.clear(bag.folders)
 	print("[UMT] umt toolkit unloaded")
