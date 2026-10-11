@@ -20,7 +20,27 @@
 -- singleton: if a Bloom instance is already running on this executor,
 -- reuse it instead of creating a second window+table. lets multiple
 -- scripts loadstring Bloom independently and share one window.
-if _G.__BloomInstance then return _G.__BloomInstance end
+--
+-- race-safe: a plain `if _G.__BloomInstance then return` leaves a window
+-- where two concurrent loadstrings both see nil and both build a window.
+-- Fix: claim a lightweight lock IMMEDIATELY (before any yielding call),
+-- so a second concurrent load sees the claim and waits for the first to
+-- finish, then returns the finished instance.
+do
+	-- small random stagger so simultaneous injections desync
+	task.wait(math.random() * 0.15)
+
+	if _G.__BloomInstance then return _G.__BloomInstance end
+	if _G.__BloomClaim then
+		-- another load is mid-build; wait up to 10s for it to finish, then
+		-- return its instance.
+		local t0 = tick()
+		while _G.__BloomClaim and (tick() - t0) < 10 do task.wait(0.05) end
+		if _G.__BloomInstance then return _G.__BloomInstance end
+		-- fell through (claim stuck or died) — proceed to build ours
+	end
+	_G.__BloomClaim = true  -- claimed BEFORE any yield below
+end
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
@@ -4527,4 +4547,5 @@ function Window:Destroy()
 end
 
 _G.__BloomInstance = Bloom
+_G.__BloomClaim = nil  -- release the build lock; others may now proceed
 return Bloom
