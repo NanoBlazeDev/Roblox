@@ -371,9 +371,259 @@ do
 		end
 	end)
 
-	bag.hooks.xray_disable = function() state.active = false; clear() end
+	-- ====================================================================
+	--  FARLAND — global scan: highlights the single best mineable ore + gem
+	--  anywhere in the mine (ignoring radius). Cap keeps perf sane.
+	-- ====================================================================
+	local farlandState = {
+		active   = false,
+		oreCap   = 30,  -- gems = oreCap / 2
+		folder   = nil,
+		bestOre  = nil, -- ore id (string)
+		bestGem  = nil,
+		bestOreName = nil,
+		bestGemName = nil,
+	}
+	farlandState.folder = Instance.new("Folder")
+	farlandState.folder.Name = "UMT_Farland"
+	farlandState.folder.Parent = Workspace
+	table.insert(bag.folders, farlandState.folder)
+
+	local farShown = {}
+
+	local function farClear()
+		for _, c in ipairs(farlandState.folder:GetChildren()) do c:Destroy() end
+		table.clear(farShown)
+	end
+
+	-- determine the single best ore + best gem user can mine (by value).
+	-- Gem classification takes precedence over Ore (Diamond, Topaz etc are
+	-- flagged as both Types.Ore AND Types.Gem in BlockDef — treat them as
+	-- Gems to match the wiki/user expectation).
+	local function computeBest()
+		if not (MUtils and BlockDef and Settings) then return end
+		local hard = MUtils.GetPlayerPickaxeHardnessClient()
+		local limit = Settings.MiningHardnessRatioLimit
+		local topOre, topGem = nil, nil
+		for id, def in pairs(BlockDef) do
+			if def.Hardness and not def.ExplosiveOnly and (def.Hardness / hard) <= limit and def.Types then
+				local isGem = def.Types.Gem == true
+				local isOre = def.Types.Ore == true and not isGem  -- Gem wins
+				local v = def.Value or 0
+				if isGem then
+					if not topGem or v > topGem.value then
+						topGem = { id = id, value = v, name = def.Name }
+					end
+				elseif isOre then
+					if not topOre or v > topOre.value then
+						topOre = { id = id, value = v, name = def.Name }
+					end
+				end
+			end
+		end
+		farlandState.bestOre     = topOre and topOre.id or nil
+		farlandState.bestGem     = topGem and topGem.id or nil
+		farlandState.bestOreName = topOre and topOre.name or nil
+		farlandState.bestGemName = topGem and topGem.name or nil
+	end
+
+	-- cached ore position index — rebuilt lazily, 10s TTL.
+	-- MASSIVE perf win: full MT._Cells iteration happens max once per 10s
+	-- instead of every farScan (which was every 5s), AND lookups are O(1)
+	-- hash by ore id instead of O(n) full-cache scan.
+	local idxCache = { ts = 0, byOre = {}, counts = {} }
+	local INDEX_TTL = 10
+
+	local function rebuildIndex()
+		local byOre, counts = {}, {}
+		for coord, block in MT._Cells:List() do
+			local oid = block.Ore
+			if oid then
+				local list = byOre[oid]
+				if not list then list = {}; byOre[oid] = list end
+				list[#list + 1] = coord
+				counts[oid] = (counts[oid] or 0) + 1
+			end
+		end
+		idxCache.byOre  = byOre
+		idxCache.counts = counts
+		idxCache.ts     = tick()
+	end
+
+	local function getIndex(forceRefresh)
+		if forceRefresh or (tick() - idxCache.ts) > INDEX_TTL then
+			rebuildIndex()
+		end
+		return idxCache
+	end
+
+	local function makeFarMarker(coord, color, label)
+		local wp = Terrain:CellCenterToWorld(coord.X, coord.Y, coord.Z)
+		local part = Instance.new("Part")
+		part.Size = Vector3.new(8, 8, 8)
+		part.CFrame = CFrame.new(wp)
+		part.Anchored, part.CanCollide, part.CanTouch = true, false, false
+		part.Transparency, part.Parent = 1, farlandState.folder
+
+		-- SolidFILL box — unlike xray's see-through boxes, farland is OPAQUE
+		local box = Instance.new("BoxHandleAdornment")
+		box.Adornee = part
+		box.Size = Vector3.new(8, 8, 8)
+		box.Color3 = color
+		box.Transparency = 0  -- fully solid
+		box.AlwaysOnTop = true
+		box.ZIndex = 10
+		box.Parent = farlandState.folder
+
+		-- white wireframe outline on top for extra distinction
+		local wire = Instance.new("SelectionBox")
+		wire.Adornee = part
+		wire.LineThickness = 0.15
+		wire.Color3 = Color3.fromRGB(255, 255, 255)
+		wire.SurfaceColor3 = color
+		wire.SurfaceTransparency = 1
+		wire.AlwaysOnTop = true
+		wire.Parent = farlandState.folder
+
+		-- floating billboard with ore name — visible from any distance
+		if label then
+			local bg = Instance.new("BillboardGui")
+			bg.Adornee = part
+			bg.Size = UDim2.fromOffset(140, 28)
+			bg.StudsOffset = Vector3.new(0, 6, 0)
+			bg.AlwaysOnTop = true
+			bg.MaxDistance = 10000
+			bg.LightInfluence = 0
+			bg.Parent = farlandState.folder
+			local tl = Instance.new("TextLabel")
+			tl.Size = UDim2.fromScale(1, 1)
+			tl.BackgroundTransparency = 0.4
+			tl.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+			tl.TextColor3 = color
+			tl.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+			tl.TextStrokeTransparency = 0
+			tl.Font = Enum.Font.GothamBold
+			tl.TextSize = 14
+			tl.Text = label
+			tl.Parent = bg
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(0, 4)
+			corner.Parent = tl
+		end
+		return part
+	end
+
+	-- count instances of a given ore id in the whole cache
+	local function countOnServer(oreId)
+		if not oreId or not MT then return 0 end
+		return getIndex().counts[oreId] or 0
+	end
+
+	local function farScan()
+		if not MT then return end
+		farClear()
+		computeBest()
+		if not (farlandState.bestOre or farlandState.bestGem) then return end
+		local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+		local myPos = hrp and hrp.Position or Vector3.new()
+		local idx = getIndex().byOre
+		-- O(1) hash lookup instead of full-cache scan
+		local oreCoords = idx[farlandState.bestOre] or {}
+		local gemCoords = idx[farlandState.bestGem] or {}
+		local ores, gems = table.create(#oreCoords), table.create(#gemCoords)
+		for i = 1, #oreCoords do
+			local c = oreCoords[i]
+			local wp = Terrain:CellCenterToWorld(c.X, c.Y, c.Z)
+			ores[i] = { coord = c, d2 = (wp - myPos).Magnitude ^ 2 }
+		end
+		for i = 1, #gemCoords do
+			local c = gemCoords[i]
+			local wp = Terrain:CellCenterToWorld(c.X, c.Y, c.Z)
+			gems[i] = { coord = c, d2 = (wp - myPos).Magnitude ^ 2 }
+		end
+		table.sort(ores, function(a, b) return a.d2 < b.d2 end)
+		table.sort(gems, function(a, b) return a.d2 < b.d2 end)
+		local oreCap = farlandState.oreCap
+		local gemCap = math.floor(oreCap / 2)
+		local oreColor = ORE_COLORS[farlandState.bestOre] or Color3.fromRGB(255,255,255)
+		local gemColor = ORE_COLORS[farlandState.bestGem] or Color3.fromRGB(255,255,255)
+		for i = 1, math.min(oreCap, #ores) do makeFarMarker(ores[i].coord, oreColor, farlandState.bestOreName) end
+		for i = 1, math.min(gemCap, #gems) do makeFarMarker(gems[i].coord, gemColor, farlandState.bestGemName) end
+	end
+
+	local farSection = tab:Section("farland (best-ore global ESP)")
+	local farToggleCtrl = farSection:Toggle("farland_on", {
+		Label = "farland enabled", Default = false,
+		Callback = function(v)
+			farlandState.active = v
+			if v then farScan() else farClear() end
+		end,
+	})
+	farSection:Int("farland_cap", {
+		Label = "ore limit (gems = limit / 2)",
+		Default = farlandState.oreCap, Min = 2, Max = 60, Step = 2,
+		Callback = function(v)
+			farlandState.oreCap = v
+			if farlandState.active then farScan() end
+		end,
+	})
+	farSection:Button("farland_rescan", {
+		Text = "rescan farland (rebuilds index)",
+		Callback = function()
+			getIndex(true)  -- force index rebuild
+			refreshFarLabels()
+			if farlandState.active then farScan() end
+			notify("farland", "index rebuilt", "info")
+		end,
+	})
+	-- live-updating stats labels (refreshed every 5s + on hardness change)
+	local farOreLbl = farSection:Label("Ore: —")
+	local farGemLbl = farSection:Label("Gem: —")
+
+	local function refreshFarLabels()
+		computeBest()
+		local nOre = countOnServer(farlandState.bestOre)
+		local nGem = countOnServer(farlandState.bestGem)
+		farOreLbl:Set(string.format("Ore: %s  x%d", farlandState.bestOreName or "—", nOre))
+		farGemLbl:Set(string.format("Gem: %s  x%d", farlandState.bestGemName or "—", nGem))
+	end
+
+	-- auto-rescan every 5s: refresh labels + redraw markers if active
+	bag.flags.farAlive = true
+	task.spawn(function()
+		while bag.flags.farAlive do
+			task.wait(5)
+			if not MT then continue end
+			refreshFarLabels()
+			if farlandState.active then task.spawn(farScan) end
+		end
+	end)
+
+	-- JOIN NOTIFICATION — 10s after load, report best stuff on server
+	task.spawn(function()
+		task.wait(10)
+		computeBest()
+		local nOre = countOnServer(farlandState.bestOre)
+		local nGem = countOnServer(farlandState.bestGem)
+		local msg = string.format(
+			"Ore: %s x%d | Gem: %s x%d",
+			farlandState.bestOreName or "—", nOre,
+			farlandState.bestGemName or "—", nGem
+		)
+		notify("farland scan", msg, "info")
+		print("[FARLAND] " .. msg)
+	end)
+
+	bag.hooks.xray_disable = function()
+		state.active = false; clear()
+		farlandState.active = false; farClear()
+	end
 	bag.hooks.xray_enable  = function() if toggle:Get() then state.active = true; scan() end end
-	bag.hooks.xray_unload  = function() bag.flags.xrayAlive = false; bag.flags.hardWatchAlive = false; state.active = false; clear() end
+	bag.hooks.xray_unload  = function()
+		bag.flags.xrayAlive = false; bag.flags.hardWatchAlive = false; bag.flags.farAlive = false
+		state.active = false; clear()
+		farlandState.active = false; farClear()
+	end
 end
 
 -- player ESP removed — the ore xray tab IS the "ore esp"
