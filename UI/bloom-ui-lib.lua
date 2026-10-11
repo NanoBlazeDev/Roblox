@@ -3667,7 +3667,10 @@ function Window:Notify(o)
 	self._toastList = self._toastList or {}
 	-- no cap — if the user has lots of modules firing notifs, show them all
 
-	local slot = frame(self._toasts, { Name = "Toast", Size = UDim2.fromOffset(W, 0), LayoutOrder = toastSeq })
+	-- give slot its full size IMMEDIATELY so UIListLayout spaces it correctly
+	-- on frame 1. Previously we tweened Size 0 → H+10, which parked rapidly-
+	-- fired toasts at the same y position until the tween finished.
+	local slot = frame(self._toasts, { Name = "Toast", Size = UDim2.fromOffset(W, H + 10), LayoutOrder = toastSeq })
 	local card = new("CanvasGroup", { Size = UDim2.fromOffset(W, H), Position = UDim2.fromOffset(28, 0), GroupTransparency = 1, BorderSizePixel = 0, Parent = slot })
 	paint(card, { BackgroundColor3 = "Window" })
 	corner(card, 8)
@@ -3692,7 +3695,7 @@ function Window:Notify(o)
 	local barF = frame(trackF, { Size = UDim2.fromScale(dur > 0 and 1 or 0, 1), BackgroundTransparency = 0 })
 	paint(barF, { BackgroundColor3 = tok })
 
-	tween(slot, Motion.Toast, { Size = UDim2.fromOffset(W, H + 10) })
+	-- entrance anim lives entirely on the card now (slot is final-size already)
 	tween(card, Motion.Toast, { Position = UDim2.new(), GroupTransparency = 0 })
 	tween(tsh, Motion.Toast, { Transparency = 0.5 })
 
