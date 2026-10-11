@@ -360,7 +360,7 @@ end
 -- If URL ends in .txt or .b64, treats the body as base64 and decodes to PNG
 -- (lets you host via GitHub Gist which refuses binary paste).
 Bloom.AtlasUrl = Bloom.AtlasUrl
-	or "https://gist.githubusercontent.com/NanoBlazeDev/e2e7ab197ad93da0964d64d3b5b94ca4/raw/icons.png"
+	or "https://raw.githubusercontent.com/NanoBlazeDev/Roblox/refs/heads/main/UI/icons.png?raw=true"
 do
 	local ATLAS_PATH = "BloomUI/icons.png"
 
