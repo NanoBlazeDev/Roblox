@@ -3641,13 +3641,31 @@ function Window:Notify(o)
 	local kind = o.Kind or "success"
 	local tok = KIND_TOKEN[kind] or "Accent"
 	local dur = o.Duration == nil and 4 or o.Duration
-	local H = o.Text and 62 or 50
 	local W = 320
 	toastSeq += 1
 
-	-- keep at most 5
+	-- dynamic height: measure wrapped title + body text and let the card
+	-- expand to fit. No truncation unless the user explicitly set Truncate.
+	local TextService = game:GetService("TextService")
+	local innerW = W - 100  -- width available for text (card minus icon + close)
+	local function measure(text, size)
+		if not text or text == "" then return 0 end
+		local ok, v = pcall(function()
+			return TextService:GetTextSize(text, size, Enum.Font.Gotham, Vector2.new(innerW, 10000))
+		end)
+		return ok and v.Y or size + 4
+	end
+	local titleH = math.max(20, measure(o.Title or "", 14))
+	local bodyH  = o.Text and measure(o.Text, 12) or 0
+	local H
+	if o.Text then
+		H = math.max(62, 20 + titleH + bodyH)  -- 11 top + title + 4 gap + body + 5 bottom
+	else
+		H = math.max(50, titleH + 20)
+	end
+
 	self._toastList = self._toastList or {}
-	if #self._toastList >= 5 then self._toastList[1].Dismiss() end
+	-- no cap — if the user has lots of modules firing notifs, show them all
 
 	local slot = frame(self._toasts, { Name = "Toast", Size = UDim2.fromOffset(W, 0), LayoutOrder = toastSeq })
 	local card = new("CanvasGroup", { Size = UDim2.fromOffset(W, H), Position = UDim2.fromOffset(28, 0), GroupTransparency = 1, BorderSizePixel = 0, Parent = slot })
@@ -3659,9 +3677,14 @@ function Window:Notify(o)
 	paint(ib, { BackgroundColor3 = tok })
 	corner(ib, 6)
 	icon(ib, o.Icon or KIND_ICON[kind], 16, tok, { Anchor = Vector2.new(0.5, 0.5), Pos = UDim2.fromScale(0.5, 0.5) })
-	label(card, lc(o.Title), { Size = 14, Font = "BodyBold", Pos = UDim2.fromOffset(56, o.Text and 11 or 0), Dim = UDim2.new(1, -100, 0, o.Text and 20 or H - 2), Truncate = true })
+	local titleLbl = label(card, lc(o.Title), { Size = 14, Font = "BodyBold", Pos = UDim2.fromOffset(56, o.Text and 10 or 0), Dim = UDim2.new(1, -100, 0, o.Text and titleH or H - 2) })
+	pcall(function() titleLbl.TextWrapped = true end)
 	if o.Text then
-		label(card, o.Text, { Size = 12, Font = "Mono", Color = "TextFaint", Pos = UDim2.fromOffset(56, 31), Dim = UDim2.new(1, -100, 0, 16), Truncate = true })
+		local bodyLbl = label(card, o.Text, { Size = 12, Font = "Mono", Color = "TextFaint", Pos = UDim2.fromOffset(56, 12 + titleH), Dim = UDim2.new(1, -100, 0, bodyH) })
+		pcall(function()
+			bodyLbl.TextWrapped = true
+			bodyLbl.TextYAlignment = Enum.TextYAlignment.Top
+		end)
 	end
 	local xb = iconButton(card, "x", { Size = 26, IconSize = 14, Pos = UDim2.new(1, -10, 0.5, -1), Anchor = Vector2.new(1, 0.5) })
 	local trackF = frame(card, { Size = UDim2.new(1, 0, 0, 2), Position = UDim2.fromScale(0, 1), AnchorPoint = Vector2.new(0, 1), BackgroundTransparency = 0 })
@@ -3931,7 +3954,10 @@ function Window:LoadConfig(name)
 	if type(payload) ~= "string" then return false, "not found" end
 	local ok2, obj = pcall(HttpService.JSONDecode, HttpService, payload)
 	if not ok2 or type(obj) ~= "table" then return false, "corrupt payload" end
-	self:ApplyConfig(obj.data)
+	-- apply silently so control callbacks (which usually fire notifications)
+	-- don't spam the user with "slider changed", "toggle changed" on every
+	-- stored value when loading a saved config.
+	self:ApplyConfig(obj.data, true)
 	return true
 end
 
