@@ -7,8 +7,47 @@
 local BLOOM_URL   = "https://raw.githubusercontent.com/NanoBlazeDev/Roblox/refs/heads/main/UI/bloom-ui-lib.lua"
 local TOOLKIT_URL = "https://raw.githubusercontent.com/NanoBlazeDev/Roblox/refs/heads/main/modules/UMT.lua"
 
-if _G.__umtToolkit then pcall(_G.__umtToolkit) end
-_G.__umtToolkit = nil
+-- ============================================================
+--  HARD KILL — authoritative teardown of ANY previous UMT load.
+--  Must not rely on Bloom's module lifecycle (which may have been
+--  singleton-swapped out from under the old module).
+-- ============================================================
+do
+	-- 1. flip the shared session token so every old loop exits on next tick.
+	--    old loops do `while _G.__umtSession == myToken`; mismatch → break.
+	_G.__umtSession = {}  -- new unique table; old loops' myToken ~= this
+
+	-- 2. call any registered teardown fns (xray/farland/boost/fling/fastmine/autosave)
+	if _G.__umtTeardowns then
+		for _, fn in ipairs(_G.__umtTeardowns) do pcall(fn) end
+	end
+	_G.__umtTeardowns = {}
+
+	-- 3. nuke any UMT folders in workspace left behind
+	for _, name in ipairs({ "UMT_XRay", "UMT_Farland", "UMT_Waypoint" }) do
+		local f = workspace:FindFirstChild(name)
+		while f do pcall(function() f:Destroy() end); f = workspace:FindFirstChild(name) end
+	end
+
+	-- 4. unhook fastmine unconditionally if it was ever hooked.
+	--    __umt_mtf_hooked stores { target, original } so we can always
+	--    restore to the TRUE original even if someone double-hooked.
+	if _G.__umt_mtf_hooked and hookfunction then
+		pcall(function()
+			hookfunction(_G.__umt_mtf_hooked.target, _G.__umt_mtf_hooked.original)
+		end)
+		_G.__umt_mtf_hooked = nil
+	end
+
+	-- 5. fallback: call old legacy cleanup if present
+	if _G.__umtToolkit then pcall(_G.__umtToolkit) end
+	_G.__umtToolkit = nil
+
+	-- give yielded loops one frame to actually exit before we build new state
+	task.wait()
+end
+
+local SESSION = _G.__umtSession  -- the token this load owns; loops check against it
 
 -- re-fire this toolkit after every teleport (server hop, rejoin, map change)
 -- so the UI survives the transition and the user doesn't have to re-inject.
@@ -112,6 +151,24 @@ end
 
 -- shared cleanup bag
 local bag = { folders = {}, flags = {}, hooks = {} }
+
+-- register a teardown fn that a FUTURE reload's hard-kill will call even if
+-- Bloom's module lifecycle never fires. keep each fn pcall-safe + idempotent.
+local function registerTeardown(fn)
+	_G.__umtTeardowns = _G.__umtTeardowns or {}
+	table.insert(_G.__umtTeardowns, fn)
+end
+
+-- master kill — flips all local loop flags so any surviving old loop in THIS
+-- closure exits even if session-token check missed a tick.
+registerTeardown(function()
+	bag.flags.xrayAlive = false
+	bag.flags.hardWatchAlive = false
+	bag.flags.farAlive = false
+	bag.flags.autosaveAlive = false
+	for _, f in ipairs(bag.folders) do pcall(function() f:Destroy() end) end
+	table.clear(bag.folders)
+end)
 
 -- ============================================================
 --  TAB — ORE XRAY
@@ -223,6 +280,7 @@ do
 
 	local function scan()
 		if state.scanning or not MT then return 0 end
+		if not state.active then return 0 end  -- toggled off between calls
 		state.scanning = true
 		recomputeAllowed()
 		local char = lp.Character
@@ -330,7 +388,7 @@ do
 	bag.flags.hardWatchAlive = true
 	task.spawn(function()
 		local lastHard = nil
-		while bag.flags.hardWatchAlive do
+		while bag.flags.hardWatchAlive and _G.__umtSession == SESSION do
 			task.wait(1)
 			if not MUtils then continue end
 			local ok, h = pcall(MUtils.GetPlayerPickaxeHardnessClient)
@@ -349,7 +407,7 @@ do
 	task.spawn(function()
 		local lastCellKey = nil
 		local idleTicks = 0
-		while bag.flags.xrayAlive do
+		while bag.flags.xrayAlive and _G.__umtSession == SESSION do
 			if not state.active then task.wait(0.4) continue end
 			local char = lp.Character
 			local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -459,51 +517,55 @@ do
 
 	local function makeFarMarker(coord, color, label)
 		local wp = Terrain:CellCenterToWorld(coord.X, coord.Y, coord.Z)
+		-- VISIBLE colored part (not invisible-part-with-adornment).
+		-- Adornments like BoxHandleAdornment only render when their adornee
+		-- is on-screen, so far-away markers invisible. Visible parts with
+		-- Material=ForceField glow at any distance and ignore adornment
+		-- rendering limits.
 		local part = Instance.new("Part")
-		part.Size = Vector3.new(8, 8, 8)
+		part.Size = Vector3.new(3.9, 3.9, 3.9)  -- match actual cell size (voxel = 4 studs)
 		part.CFrame = CFrame.new(wp)
-		part.Anchored, part.CanCollide, part.CanTouch = true, false, false
-		part.Transparency, part.Parent = 1, farlandState.folder
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanTouch = false
+		part.CanQuery = false
+		part.CastShadow = false
+		part.Transparency = 0.25
+		part.Color = color
+		part.Material = Enum.Material.ForceField  -- glows, visible from any distance
+		part.TopSurface = Enum.SurfaceType.Smooth
+		part.BottomSurface = Enum.SurfaceType.Smooth
+		part.Parent = farlandState.folder
 
-		-- SolidFILL box — unlike xray's see-through boxes, farland is OPAQUE
-		local box = Instance.new("BoxHandleAdornment")
-		box.Adornee = part
-		box.Size = Vector3.new(8, 8, 8)
-		box.Color3 = color
-		box.Transparency = 0  -- fully solid
-		box.AlwaysOnTop = true
-		box.ZIndex = 10
-		box.Parent = farlandState.folder
-
-		-- white wireframe outline on top for extra distinction
-		local wire = Instance.new("SelectionBox")
-		wire.Adornee = part
-		wire.LineThickness = 0.15
-		wire.Color3 = Color3.fromRGB(255, 255, 255)
-		wire.SurfaceColor3 = color
-		wire.SurfaceTransparency = 1
-		wire.AlwaysOnTop = true
-		wire.Parent = farlandState.folder
+		-- Highlight for ALWAYS-ON-TOP rendering through terrain
+		local hl = Instance.new("Highlight")
+		hl.Adornee = part
+		hl.FillColor = color
+		hl.FillTransparency = 0.4
+		hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+		hl.OutlineTransparency = 0
+		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		hl.Parent = part
 
 		-- floating billboard with ore name — visible from any distance
 		if label then
 			local bg = Instance.new("BillboardGui")
 			bg.Adornee = part
-			bg.Size = UDim2.fromOffset(140, 28)
-			bg.StudsOffset = Vector3.new(0, 6, 0)
+			bg.Size = UDim2.fromOffset(160, 32)
+			bg.StudsOffset = Vector3.new(0, 4, 0)
 			bg.AlwaysOnTop = true
-			bg.MaxDistance = 10000
+			bg.MaxDistance = 0  -- 0 = unlimited visibility distance
 			bg.LightInfluence = 0
-			bg.Parent = farlandState.folder
+			bg.Parent = part
 			local tl = Instance.new("TextLabel")
 			tl.Size = UDim2.fromScale(1, 1)
-			tl.BackgroundTransparency = 0.4
+			tl.BackgroundTransparency = 0.3
 			tl.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 			tl.TextColor3 = color
 			tl.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
 			tl.TextStrokeTransparency = 0
 			tl.Font = Enum.Font.GothamBold
-			tl.TextSize = 14
+			tl.TextSize = 15
 			tl.Text = label
 			tl.Parent = bg
 			local corner = Instance.new("UICorner")
@@ -590,8 +652,9 @@ do
 
 	-- auto-rescan every 5s: refresh labels + redraw markers if active
 	bag.flags.farAlive = true
+	local farToken = SESSION
 	task.spawn(function()
-		while bag.flags.farAlive do
+		while bag.flags.farAlive and _G.__umtSession == farToken do
 			task.wait(5)
 			if not MT then continue end
 			refreshFarLabels()
@@ -624,6 +687,7 @@ do
 		state.active = false; clear()
 		farlandState.active = false; farClear()
 	end
+	registerTeardown(bag.hooks.xray_unload)
 end
 
 -- player ESP removed — the ore xray tab IS the "ore esp"
@@ -804,6 +868,7 @@ do
 	bag.hooks.boost_disable = function() state.enabled = false; revertAll() end
 	bag.hooks.boost_enable  = function() state.enabled = true end
 	bag.hooks.boost_unload  = function() state.enabled = false; revertAll() end
+	registerTeardown(bag.hooks.boost_unload)
 end
 
 -- ============================================================
@@ -1217,6 +1282,7 @@ do
 
 	bag.hooks.fling_disable = function() stopFling(); clearHighlight() end
 	bag.hooks.fling_unload  = function() stopFling(); clearHighlight() end
+	registerTeardown(bag.hooks.fling_unload)
 end
 
 -- ============================================================
@@ -1229,14 +1295,27 @@ do
 	local state = { active = false, mult = 0.75, oldMTF = nil }
 	local function enable()
 		if state.active or not MTF or not hookfunction then return end
-		state.oldMTF = hookfunction(MTF, function(speed, hardness, bh)
+		-- stash the TRUE original globally the first time we ever hook, so a
+		-- later reload (without this closure) can still restore it cleanly.
+		if not _G.__umt_mtf_hooked then
+			_G.__umt_mtf_hooked = { target = MTF, original = nil }
+		end
+		local prev = hookfunction(MTF, function(speed, hardness, bh)
 			return state.oldMTF(speed, hardness, bh) * state.mult
 		end)
+		state.oldMTF = prev
+		-- only record the FIRST hook's return as "true original"
+		if _G.__umt_mtf_hooked.original == nil then
+			_G.__umt_mtf_hooked.original = prev
+		end
 		state.active = true
 	end
 	local function disable()
-		if not state.active or not state.oldMTF then return end
-		pcall(function() hookfunction(MTF, state.oldMTF) end)
+		if not state.active then return end
+		-- unconditionally restore to the TRUE original if we have it
+		local trueOrig = _G.__umt_mtf_hooked and _G.__umt_mtf_hooked.original
+		pcall(function() hookfunction(MTF, trueOrig or state.oldMTF) end)
+		_G.__umt_mtf_hooked = nil
 		state.active = false
 	end
 
@@ -1253,6 +1332,7 @@ do
 	bag.hooks.pick_disable = disable
 	bag.hooks.pick_enable  = function() end
 	bag.hooks.pick_unload  = disable
+	registerTeardown(disable)
 end
 
 -- ============================================================
@@ -1347,7 +1427,7 @@ do
 	local lastDump = ""
 	task.spawn(function()
 		task.wait(2)  -- let LoadConfig settle first
-		while bag.flags.autosaveAlive do
+		while bag.flags.autosaveAlive and _G.__umtSession == SESSION do
 			task.wait(3)
 			local ok, cur = pcall(function()
 				return HS:JSONEncode(mod.Window:GetConfig())
