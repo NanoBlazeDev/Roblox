@@ -151,6 +151,7 @@ local okMod, mod = pcall(function()
 		Version     = "1.1",
 		Author      = "ExaVolt",
 		Description = "ultimate mining tycoon tools — ore xray, vehicle boost, waypoints, flinger, fastmine, server hop",
+		AutoConfig  = CFG_NAME,  -- Bloom owns load/save lifecycle for us
 	})
 end)
 if not okMod or not mod then
@@ -1437,61 +1438,17 @@ _G.__umtToolkit = function()
 end
 
 -- ============================================================
---  AUTO LOAD + AUTO SAVE
+--  POST-LOAD HOOKS
 -- ============================================================
-do
-	-- gate autosave on load completion so we never save default values on
-	-- top of a user's saved config before LoadConfig has run.
-	local loadDone  = false
-	local loadOk    = false
-	local lastDump  = nil  -- seeded from POST-load state, not ""
-
-	task.defer(function()
-		loadOk = pcall(function() mod.Window:LoadConfig(CFG_NAME) end)
-		if loadOk then notify("config", "loaded " .. CFG_NAME, "info") end
-		-- LoadConfig is silent → control Callbacks don't fire → side-effect
-		-- hooks (fastmine hookfunction, future ones) never get applied even
-		-- though the toggle visually shows ON. Resync them here.
-		for name, fn in pairs(bag.hooks) do
-			if name:sub(-7) == "_resync" then pcall(fn) end
-		end
-		-- seed baseline AFTER load so autosave only fires on genuine changes.
-		local ok, cur = pcall(function() return HS:JSONEncode(mod.Window:GetConfig()) end)
-		if ok then lastDump = cur end
-		loadDone = true
-	end)
-
-	bag.flags.autosaveAlive = true
-	task.spawn(function()
-		while bag.flags.autosaveAlive and _G.__umtSession == SESSION do
-			task.wait(3)
-			-- never save until LoadConfig has run — otherwise a defaults
-			-- snapshot can overwrite the user's good saved config.
-			if not loadDone then continue end
-			-- also skip if load failed AND no file existed (lastDump nil):
-			-- without a baseline we can't tell "no changes" from "fresh".
-			if lastDump == nil then
-				local ok, cur = pcall(function() return HS:JSONEncode(mod.Window:GetConfig()) end)
-				if ok then lastDump = cur end
-				continue
-			end
-			local ok, cur = pcall(function() return HS:JSONEncode(mod.Window:GetConfig()) end)
-			if ok and cur ~= lastDump then
-				lastDump = cur
-				pcall(function() mod.Window:SaveConfig(CFG_NAME) end)
-			end
-		end
-	end)
-
-	-- also save on module unload so last state survives even without 3s tick
-	-- BUT only if LoadConfig completed — otherwise we might flush defaults.
-	mod:OnUnload(function()
-		bag.flags.autosaveAlive = false
-		if loadDone and lastDump ~= nil then
-			pcall(function() mod.Window:SaveConfig(CFG_NAME) end)
-		end
-	end)
-end
+-- Bloom's AutoConfig handles LoadConfig + autosave + unload-flush for us.
+-- All we do here is wire the resyncs that have to run after a silent load
+-- (fastmine hookfunction can't be installed via a silent toggle restore).
+mod:OnConfigLoaded(function(ok)
+	if ok then notify("config", "loaded " .. CFG_NAME, "info") end
+	for hname, fn in pairs(bag.hooks) do
+		if hname:sub(-7) == "_resync" then pcall(fn) end
+	end
+end)
 
 _G.__umtClaim = nil  -- release concurrency lock
 print("[UMT] umt toolkit v1.1 loaded — 6 tabs ready")
