@@ -8,6 +8,21 @@ local BLOOM_URL   = "https://raw.githubusercontent.com/NanoBlazeDev/Roblox/refs/
 local TOOLKIT_URL = "https://raw.githubusercontent.com/NanoBlazeDev/Roblox/refs/heads/main/modules/UMT.lua"
 
 -- ============================================================
+--  CONCURRENCY GUARD — stop two parallel injections from both passing
+--  the "no previous load" check and both wiring tabs.
+-- ============================================================
+do
+	task.wait(math.random() * 0.2)  -- jitter so twin injections desync
+	if _G.__umtClaim then
+		local t0 = tick()
+		while _G.__umtClaim and (tick() - t0) < 10 do task.wait(0.05) end
+		-- the other load finished setup — bail; it already built everything
+		if _G.__umtToolkit then return end
+	end
+	_G.__umtClaim = true  -- claim BEFORE any yielding call below
+end
+
+-- ============================================================
 --  HARD KILL — authoritative teardown of ANY previous UMT load.
 --  Must not rely on Bloom's module lifecycle (which may have been
 --  singleton-swapped out from under the old module).
@@ -1446,5 +1461,6 @@ do
 	end)
 end
 
+_G.__umtClaim = nil  -- release concurrency lock
 print("[UMT] umt toolkit v1.1 loaded — 6 tabs ready")
 notify("umt toolkit", "loaded — 4 tabs", "success")
