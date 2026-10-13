@@ -645,6 +645,23 @@ do
 			if farlandState.active then farScan() end
 		end,
 	})
+	-- live-updating stats labels (refreshed every 5s + on hardness change)
+	local farOreLbl = farSection:Label("Ore: —")
+	local farGemLbl = farSection:Label("Gem: —")
+
+	-- forward-declare so the button Callback below closes over the real local
+	-- (Lua binds at closure-creation; a reference to an not-yet-declared local
+	-- becomes a global reference that stays nil forever → `attempt to call nil`
+	-- when the button is clicked. Declare the local FIRST, assign body after,
+	-- or declare and assign before any closure that uses it.)
+	local function refreshFarLabels()
+		computeBest()
+		local nOre = countOnServer(farlandState.bestOre)
+		local nGem = countOnServer(farlandState.bestGem)
+		farOreLbl:Set(string.format("Ore: %s  x%d", farlandState.bestOreName or "—", nOre))
+		farGemLbl:Set(string.format("Gem: %s  x%d", farlandState.bestGemName or "—", nGem))
+	end
+
 	farSection:Button("farland_rescan", {
 		Text = "rescan farland (rebuilds index)",
 		Callback = function()
@@ -654,17 +671,6 @@ do
 			notify("farland", "index rebuilt", "info")
 		end,
 	})
-	-- live-updating stats labels (refreshed every 5s + on hardness change)
-	local farOreLbl = farSection:Label("Ore: —")
-	local farGemLbl = farSection:Label("Gem: —")
-
-	local function refreshFarLabels()
-		computeBest()
-		local nOre = countOnServer(farlandState.bestOre)
-		local nGem = countOnServer(farlandState.bestGem)
-		farOreLbl:Set(string.format("Ore: %s  x%d", farlandState.bestOreName or "—", nOre))
-		farGemLbl:Set(string.format("Gem: %s  x%d", farlandState.bestGemName or "—", nGem))
-	end
 
 	-- auto-rescan every 5s: refresh labels + redraw markers if active
 	bag.flags.farAlive = true
