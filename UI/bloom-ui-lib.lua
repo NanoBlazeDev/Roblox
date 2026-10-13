@@ -4062,15 +4062,18 @@ function Tab:ThemeManager(title)
 	for n in Bloom.Themes do names[#names + 1] = n end
 	table.sort(names)
 	local accent
+	-- Save = true on both now (was false). _startWindowAutoSave includes any
+	-- __-prefixed control in the bloom_window slot and re-fires the Callback
+	-- on load, so the theme/accent restore properly across sessions.
 	sec:Enum("__theme", {
-		Label = "Preset", Options = names, Default = current.Name, Save = false,
+		Label = "Preset", Options = names, Default = current.Name,
 		Callback = function(n)
 			Bloom:SetTheme(n)
 			if accent then accent:Set(current.Accent, true) end
 		end,
 	})
 	accent = sec:Color("__accent", {
-		Label = "Accent", Default = current.Accent, Save = false, Live = false,
+		Label = "Accent", Default = current.Accent, Live = false,
 		Callback = function(col)
 			local t = current:Extend({ Accent = col, TBool = col })
 			t.Name = current.Name
