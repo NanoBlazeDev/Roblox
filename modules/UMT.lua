@@ -356,11 +356,11 @@ do
 			if v then notify("xray on", scan() .. " ores", "success") else clear() end
 		end,
 	})
-	sec:Int("xray_radius", {
+	local radiusCtl = sec:Int("xray_radius", {
 		Label = "radius (cells)", Default = state.radius, Min = 3, Max = 40, Step = 1,
 		Callback = function(v) state.radius = v; if state.active then scan() end end,
 	})
-	sec:Int("xray_topn", {
+	local topnCtl = sec:Int("xray_topn", {
 		Label = "top-N per category (ores+gems)",
 		Default = state.topN, Min = 1, Max = 10, Step = 1,
 		Callback = function(v) state.topN = v; if state.active then scan() end end,
@@ -637,7 +637,7 @@ do
 			if v then farScan() else farClear() end
 		end,
 	})
-	farSection:Int("farland_cap", {
+	local farCapCtl = farSection:Int("farland_cap", {
 		Label = "ore limit (gems = limit / 2)",
 		Default = farlandState.oreCap, Min = 2, Max = 60, Step = 2,
 		Callback = function(v)
@@ -712,15 +712,19 @@ do
 	registerTeardown(bag.hooks.xray_unload)
 
 	-- cold-start resyncs: LoadConfig silently restores toggle visuals but
-	-- skips Callbacks, so state.active + farlandState.active stay false
-	-- even when the toggles show ON. Fire the actual side effects here.
+	-- skips Callbacks, so state.active, state.radius, state.topN all stay
+	-- at their Defaults even when the UI shows saved values. Pull saved
+	-- numbers into state FIRST, then enable + scan with correct params.
 	bag.hooks.xray_resync = function()
+		state.radius = radiusCtl:Get() or state.radius
+		state.topN   = topnCtl:Get()   or state.topN
 		if toggle:Get() then
 			state.active = true
 			task.spawn(scan)
 		end
 	end
 	bag.hooks.farland_resync = function()
+		farlandState.oreCap = farCapCtl:Get() or farlandState.oreCap
 		if farToggleCtrl:Get() then
 			farlandState.active = true
 			task.spawn(farScan)
@@ -882,21 +886,31 @@ do
 		end)
 	end
 
-	sec:Toggle("boost_on",    { Label = "auto-boost on sit", Default = true,
+	local boostToggle = sec:Toggle("boost_on", { Label = "auto-boost on sit", Default = true,
 		Callback = function(v)
 			state.enabled = v
 			if not v then revertAll() end  -- flipping off reverts everything
 		end })
-	sec:Int("boost_power",   { Label = "power mult",     Default = 15, Min = 1, Max = 500, Step = 1,
+	local boostPower = sec:Int("boost_power",   { Label = "power mult",     Default = 15, Min = 1, Max = 500, Step = 1,
 		Callback = function(v) state.POWER_MULT = v end })
-	sec:Int("boost_peak",    { Label = "peak-revs mult", Default = 3,  Min = 1, Max = 50,  Step = 1,
+	local boostPeak  = sec:Int("boost_peak",    { Label = "peak-revs mult", Default = 3,  Min = 1, Max = 50,  Step = 1,
 		Callback = function(v) state.PEAK_MULT = v end })
-	sec:Int("boost_brake",   { Label = "brake mult",     Default = 15, Min = 1, Max = 500, Step = 1,
+	local boostBrake = sec:Int("boost_brake",   { Label = "brake mult",     Default = 15, Min = 1, Max = 500, Step = 1,
 		Callback = function(v) state.BRAKE_MULT = v end })
-	sec:Number("boost_grip", { Label = "grip mult (1 = stock)",     Default = 2, Min = 1, Max = 20, Step = 0.1,
+	local boostGrip  = sec:Number("boost_grip", { Label = "grip mult (1 = stock)",     Default = 2, Min = 1, Max = 20, Step = 0.1,
 		Callback = function(v) state.GRIP_MULT = v end })
-	sec:Number("boost_down", { Label = "downforce mult (grows with speed² — keep ≤2)", Default = 1, Min = 0, Max = 10, Step = 0.1,
+	local boostDown  = sec:Number("boost_down", { Label = "downforce mult (grows with speed² — keep ≤2)", Default = 1, Min = 0, Max = 10, Step = 0.1,
 		Callback = function(v) state.DOWNFORCE_MULT = v end })
+	-- cold-start: pull every saved multiplier into its state slot so boosts
+	-- applied on the next vehicle sit use loaded config, not Defaults.
+	bag.hooks.boost_resync = function()
+		state.enabled        = boostToggle:Get()
+		state.POWER_MULT     = boostPower:Get()  or state.POWER_MULT
+		state.PEAK_MULT      = boostPeak:Get()   or state.PEAK_MULT
+		state.BRAKE_MULT     = boostBrake:Get()  or state.BRAKE_MULT
+		state.GRIP_MULT      = boostGrip:Get()   or state.GRIP_MULT
+		state.DOWNFORCE_MULT = boostDown:Get()   or state.DOWNFORCE_MULT
+	end
 	sec:Button("boost_revert", { Text = "revert all vehicles to stock", Danger = true,
 		Callback = function()
 			revertAll()
