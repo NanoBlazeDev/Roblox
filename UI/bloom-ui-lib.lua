@@ -4645,12 +4645,19 @@ function Window:_startWindowAutoSave(slot)
 
 	task.defer(function()
 		-- try to load existing bloom_window config
-		pcall(function()
-			if readfile and isfile and self._configEndpoint and self._configEndpoint.List then
-				-- rely on the standard LoadConfig path by applying just the __ keys
+		pcall(function() self:LoadConfig(slot) end)
+		-- LoadConfig applies values silently (ctl:Set(v, true)), which updates
+		-- the visual state but skips the Callback. For Bloom chrome controls
+		-- the Callback is what actually APPLIES the side effect (toggles
+		-- self._patternOff, mutates Bloom.Pattern.Alpha, re-tweens the dim
+		-- overlay, etc.). Without this re-fire the UI shows the saved state
+		-- but the engine runs at defaults.
+		for id, ctl in pairs(self.Flags) do
+			if type(id) == "string" and id:sub(1, 2) == "__" and ctl.Callback then
+				local ok, v = pcall(function() return ctl:Get() end)
+				if ok then pcall(ctl.Callback, v) end
 			end
-			self:LoadConfig(slot)
-		end)
+		end
 		lastDump = snapshot()
 		loadDone = true
 	end)
