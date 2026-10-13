@@ -710,6 +710,22 @@ do
 		farlandState.active = false; farClear()
 	end
 	registerTeardown(bag.hooks.xray_unload)
+
+	-- cold-start resyncs: LoadConfig silently restores toggle visuals but
+	-- skips Callbacks, so state.active + farlandState.active stay false
+	-- even when the toggles show ON. Fire the actual side effects here.
+	bag.hooks.xray_resync = function()
+		if toggle:Get() then
+			state.active = true
+			task.spawn(scan)
+		end
+	end
+	bag.hooks.farland_resync = function()
+		if farToggleCtrl:Get() then
+			farlandState.active = true
+			task.spawn(farScan)
+		end
+	end
 end
 
 -- player ESP removed — the ore xray tab IS the "ore esp"
@@ -1346,18 +1362,26 @@ do
 			if v then enable(); notify("fastmine on", "x" .. state.mult, "success")
 			else disable() end
 		end })
-	-- expose so autoload can re-apply the hook after a silent LoadConfig
-	-- (LoadConfig restores toggle state but skips the Callback → hook not set)
+	local fmMult = sec:Number("fastmine_mult", { Label = "time multiplier (lower = faster)",
+		Default = 0.75, Min = 0.1, Max = 1.0, Step = 0.05,
+		Callback = function(v) state.mult = v; if state.active then disable() enable() end end })
+	-- expose so autoload can re-apply the hook after a silent LoadConfig.
+	-- LoadConfig restores the controls visually but skips Callbacks, so
+	-- state.mult stays at 0.75 (Default) even when the slider shows 0.1 —
+	-- the hook then runs at 0.75 multiplier instead of 0.1 until the user
+	-- drags the slider. Resync pulls the saved mult from the control first,
+	-- THEN re-fires enable() if the toggle wants it on.
 	bag.hooks.pick_resync = function()
+		state.mult = fmMult:Get() or state.mult  -- pull saved mult
 		if fmToggle:Get() and not state.active then
 			enable()
 		elseif not fmToggle:Get() and state.active then
 			disable()
+		elseif state.active then
+			-- toggle unchanged, but mult might have — rebuild hook with new mult
+			disable(); enable()
 		end
 	end
-	sec:Number("fastmine_mult", { Label = "time multiplier (lower = faster)",
-		Default = 0.75, Min = 0.1, Max = 1.0, Step = 0.05,
-		Callback = function(v) state.mult = v; if state.active then disable() enable() end end })
 	sec:Label("warning: < 0.5 risks server rollback")
 
 	bag.hooks.pick_disable = disable
