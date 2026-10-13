@@ -4592,19 +4592,21 @@ function Window:_buildBuiltins()
 	self._settingsTab = st
 	st:ThemeManager("theme")
 	local look = st:Section("look")
-	look:Toggle("__pattern", { Label = "pattern", Default = true, Save = false, Callback = function(v)
+	-- Save = true on these now (was false, meaning they'd reset every session).
+	-- Window-level persistence is handled by _startWindowAutoSave below.
+	look:Toggle("__pattern", { Label = "pattern", Default = true, Callback = function(v)
 		self._patternOff = not v
 		self:_applyPattern(true)
 	end })
 	look:Number("__pattern_alpha", { Label = "pattern strength", Min = 0, Max = 0.25, Step = 0.01,
-		Default = Bloom.Pattern.Alpha or current.PatternAlpha or 0.08, Save = false, Callback = function(v)
+		Default = Bloom.Pattern.Alpha or current.PatternAlpha or 0.08, Callback = function(v)
 			Bloom.Pattern.Alpha = v
 			self:_applyPattern(false)
 		end })
-	look:Toggle("__border_anim", { Label = "animated border", Default = Bloom.Border.Animated ~= false, Save = false, Callback = function(v)
+	look:Toggle("__border_anim", { Label = "animated border", Default = Bloom.Border.Animated ~= false, Callback = function(v)
 		Bloom.Border.Animated = v
 	end })
-	look:Toggle("__dim", { Label = "dim backdrop", Default = self._useDim, Save = false, Callback = function(v)
+	look:Toggle("__dim", { Label = "dim backdrop", Default = self._useDim, Callback = function(v)
 		self._useDim = v
 		if self.Visible then
 			self._dim.Visible = true
@@ -4613,9 +4615,58 @@ function Window:_buildBuiltins()
 	end })
 	st:ConfigManager("configs")
 	local keys = st:Section("keys")
-	keys:Keybind("__toggle_key", { Label = "panel key", Default = self.ToggleKey, AllowToggleKey = true, Save = false, Callback = function(k)
+	keys:Keybind("__toggle_key", { Label = "panel key", Default = self.ToggleKey, AllowToggleKey = true, Callback = function(k)
 		if k then self.ToggleKey = k end
 	end })
+
+	-- window-level autosave (separate from per-module AutoConfig). loads/saves
+	-- just the __-prefixed Bloom chrome settings to a dedicated slot so UI
+	-- tweaks persist across sessions regardless of which modules are loaded.
+	self:_startWindowAutoSave("bloom_window")
+end
+
+-- subset save/load: only persist controls whose id starts with "__" (chrome
+-- settings), kept separate from module configs so UI prefs don't collide.
+function Window:_startWindowAutoSave(slot)
+	local HS = game:GetService("HttpService")
+	local loadDone, lastDump = false, nil
+
+	local function snapshot()
+		local out = {}
+		for id, c in pairs(self.Flags) do
+			if type(id) == "string" and id:sub(1, 2) == "__" then
+				local ok, v = pcall(function() return c:Get() end)
+				if ok then out[id] = v end
+			end
+		end
+		local okE, s = pcall(function() return HS:JSONEncode(out) end)
+		return okE and s or nil
+	end
+
+	task.defer(function()
+		-- try to load existing bloom_window config
+		pcall(function()
+			if readfile and isfile and self._configEndpoint and self._configEndpoint.List then
+				-- rely on the standard LoadConfig path by applying just the __ keys
+			end
+			self:LoadConfig(slot)
+		end)
+		lastDump = snapshot()
+		loadDone = true
+	end)
+
+	-- hook AnyControlChanged, but only save if a __-prefix control changed
+	local sigConn = self.AnyControlChanged:Connect(function(ctl)
+		if not loadDone or not ctl or not ctl.Id then return end
+		if type(ctl.Id) ~= "string" or ctl.Id:sub(1, 2) ~= "__" then return end
+		local cur = snapshot()
+		if cur and cur ~= lastDump then
+			lastDump = cur
+			pcall(function() self:SaveConfig(slot) end)
+		end
+	end)
+
+	self._windowAutosaveConn = sigConn
 end
 
 --------------------------------------------------------------------------
