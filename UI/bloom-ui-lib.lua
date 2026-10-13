@@ -967,6 +967,7 @@ function Window._new(opts)
 	self.Shown = Signal.new()
 	self.Hidden = Signal.new()
 	self.ModulesChanged = Signal.new()
+	self.AnyControlChanged = Signal.new()  -- fires on every Control:_emit
 	local size = self.Size
 	local S = Bloom.Strings
 
@@ -2194,6 +2195,12 @@ end
 function Control:_emit()
 	self.Changed:Fire(self.Value)
 	if self.Callback then task.spawn(self.Callback, self.Value) end
+	-- window-wide signal so AutoConfig can save on ANY change immediately
+	-- instead of polling every 3s (keeps configs tight to the user's actions).
+	local win = self.Window
+	if win and win.AnyControlChanged then
+		win.AnyControlChanged:Fire(self)
+	end
 end
 
 function Control:SetVisible(b)
@@ -4137,19 +4144,47 @@ function Module:_startAutoConfig()
 		loadDone = true
 	end)
 
+	-- helper: do the diff-check + save (shared by event-driven and polling paths)
+	local saving = false
+	local function trySave()
+		if saving or not loadDone or lastDump == nil then return end
+		local ok, cur = pcall(function() return HS:JSONEncode(win:GetConfig()) end)
+		if ok and cur ~= lastDump then
+			saving = true
+			lastDump = cur
+			pcall(function() win:SaveConfig(slot) end)
+			saving = false
+		end
+	end
+
+	-- EVENT-DRIVEN: fire a debounced save on EVERY control change.
+	-- debouncing collapses rapid changes (slider drag, keybind rebind) into one
+	-- write; the ~400ms window is short enough that configs are never stale
+	-- but long enough that scroll-wheeling a Number control doesn't thrash
+	-- the file. Each new change bumps the deadline forward.
+	local pending = 0
+	local function schedule()
+		if not self._autoConfigAlive or self._unloaded then return end
+		pending = tick() + 0.4
+		task.spawn(function()
+			local myDeadline = pending
+			while tick() < pending do task.wait(0.1) end
+			-- only this spawn's deadline wins; others were superseded
+			if pending == myDeadline then trySave() end
+		end)
+	end
+	local sigConn = win.AnyControlChanged:Connect(schedule)
+
+	-- POLLING FALLBACK: still run a slow diff-check every 5s in case something
+	-- bypassed _emit (direct state mutation, external script set a flag, etc.)
 	task.spawn(function()
 		while self._autoConfigAlive and not self._unloaded do
-			task.wait(3)
-			if not loadDone then continue end
+			task.wait(5)
 			if lastDump == nil then
 				local ok, cur = pcall(function() return HS:JSONEncode(win:GetConfig()) end)
 				if ok then lastDump = cur end
-				continue
-			end
-			local ok, cur = pcall(function() return HS:JSONEncode(win:GetConfig()) end)
-			if ok and cur ~= lastDump then
-				lastDump = cur
-				pcall(function() win:SaveConfig(slot) end)
+			else
+				trySave()
 			end
 		end
 	end)
@@ -4157,6 +4192,7 @@ function Module:_startAutoConfig()
 	-- flush on unload, but only if load actually completed
 	self:OnUnload(function()
 		self._autoConfigAlive = false
+		pcall(function() sigConn:Disconnect() end)
 		if loadDone and lastDump ~= nil then
 			pcall(function() win:SaveConfig(slot) end)
 		end
