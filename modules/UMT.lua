@@ -1411,13 +1411,60 @@ do
 	local tab = mod:Tab({ Name = "server hop" })
 	local sec = tab:Section("session")
 
-	_G.__visitedServers = _G.__visitedServers or {}
-	_G.__visitedServers[game.JobId] = true
+	-- disk-backed visited-server memory with per-entry timestamps + aging.
+	-- entries older than VISIT_TTL expire (default 4h — long enough to avoid
+	-- bouncing back to a just-left server, short enough that the list stays
+	-- small and old IDs eventually recycle). Falls back to in-memory table
+	-- if writefile isn't available.
+	local VISIT_FILE = "BloomUI/umt_visited.json"
+	local VISIT_TTL  = 4 * 3600  -- seconds
+
+	local visited = {}  -- {serverId = unix_timestamp}
+
+	local function loadVisited()
+		if not (readfile and isfile and isfile(VISIT_FILE)) then return end
+		local ok, raw = pcall(readfile, VISIT_FILE)
+		if not ok or type(raw) ~= "string" then return end
+		local ok2, obj = pcall(HS.JSONDecode, HS, raw)
+		if ok2 and type(obj) == "table" then
+			local now = os.time()
+			for id, ts in pairs(obj) do
+				-- drop expired entries at load time
+				if type(ts) == "number" and (now - ts) < VISIT_TTL then
+					visited[id] = ts
+				end
+			end
+		end
+	end
+
+	local function saveVisited()
+		if not writefile then return end
+		pcall(writefile, VISIT_FILE, HS:JSONEncode(visited))
+	end
+
+	local function markVisited(id)
+		visited[id] = os.time()
+		saveVisited()
+	end
+
+	local function isVisited(id)
+		local ts = visited[id]
+		if not ts then return false end
+		if (os.time() - ts) >= VISIT_TTL then
+			visited[id] = nil  -- lazy expire
+			return false
+		end
+		return true
+	end
 
 	local function visitedCount()
-		local n = 0; for _ in pairs(_G.__visitedServers) do n += 1 end; return n
+		local n = 0; for _ in pairs(visited) do n += 1 end; return n
 	end
-	local vLbl = sec:Label("visited: " .. visitedCount())
+
+	loadVisited()
+	markVisited(game.JobId)
+
+	local vLbl = sec:Label("visited: " .. visitedCount() .. "  (expire 4h)")
 
 	sec:Button("hop_go", { Text = "hop to fresh server", Primary = true,
 		Callback = function()
@@ -1432,20 +1479,21 @@ do
 				for _, v in next, body.data do
 					if type(v) == "table" and tonumber(v.playing) and tonumber(v.maxPlayers)
 					   and v.playing < v.maxPlayers and v.id ~= game.JobId
-					   and not _G.__visitedServers[v.id] then
+					   and not isVisited(v.id) then
 						table.insert(servers, v.id)
 					end
 				end
 			end
 			vLbl:Set("visited: " .. visitedCount() .. " | fresh: " .. #servers)
-			if #servers == 0 then notify("no fresh", "reset to clear memory", "warn") return end
+			if #servers == 0 then notify("no fresh", "all seen or small pool", "warn") return end
 			local target = servers[math.random(1, #servers)]
-			_G.__visitedServers[target] = true
+			markVisited(target)
 			TS:TeleportToPlaceInstance(game.PlaceId, target, lp)
 		end })
 	sec:Button("hop_reset", { Text = "reset visited", Danger = true,
 		Callback = function()
-			_G.__visitedServers = { [game.JobId] = true }
+			visited = { [game.JobId] = os.time() }
+			saveVisited()
 			vLbl:Set("visited: 1"); notify("reset", "", "info")
 		end })
 	sec:Button("hop_rejoin", { Text = "rejoin this server",
