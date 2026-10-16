@@ -1061,13 +1061,17 @@ do
 	})
 
 	-- hotkeys: T = flip, V = bring
-	UIS.InputBegan:Connect(function(input, gpe)
+	local hotkeyConn = UIS.InputBegan:Connect(function(input, gpe)
 		if gpe then return end
 		if input.KeyCode == Enum.KeyCode.T then
 			flipVehicle180()
 		elseif input.KeyCode == Enum.KeyCode.V then
 			bringVehicleHere()
 		end
+	end)
+	registerTeardown(function()
+		if hotkeyConn then pcall(function() hotkeyConn:Disconnect() end) end
+		hotkeyConn = nil
 	end)
 
 	-- expose flinger helpers via upvalue capture for flinger tab below
