@@ -148,9 +148,9 @@ local CFG_NAME = "umt_default"  -- config slot name inside Bloom's shared config
 local okMod, mod = pcall(function()
 	return Bloom:Module({
 		Name        = "umt toolkit",
-		Version     = "1.1",
+		Version     = "2.0",
 		Author      = "ExaVolt",
-		Description = "ultimate mining tycoon tools — ore xray, vehicle boost, waypoints, flinger, fastmine, server hop",
+		Description = "ultimate mining tycoon tools — ore xray, vehicle boost, vehicle flip, flinger, fastmine, server hop",
 		AutoConfig  = CFG_NAME,  -- Bloom owns load/save lifecycle for us
 	})
 end)
@@ -446,15 +446,20 @@ do
 	end)
 
 	-- ====================================================================
-	--  FARLAND — global scan: highlights the single best mineable ore + gem
+	--  FARLAND — global scan: highlights the TOP-N mineable ores + gems
 	--  anywhere in the mine (ignoring radius). Cap keeps perf sane.
 	-- ====================================================================
 	local farlandState = {
 		active   = false,
 		oreCap   = 30,  -- gems = oreCap / 2
+		tiers    = 1,   -- how many top-N tiers of ore/gem to show
+		showOres = true,
+		showGems = true,
 		folder   = nil,
-		bestOre  = nil, -- ore id (string)
+		bestOre  = nil, -- ore id (string) — kept for label backwards-compat
 		bestGem  = nil,
+		topOres  = {},  -- sorted {id, value, name} desc by value
+		topGems  = {},
 		bestOreName = nil,
 		bestGemName = nil,
 	}
@@ -478,27 +483,28 @@ do
 		if not (MUtils and BlockDef and Settings) then return end
 		local hard = MUtils.GetPlayerPickaxeHardnessClient()
 		local limit = Settings.MiningHardnessRatioLimit
-		local topOre, topGem = nil, nil
+		local ores, gems = {}, {}
 		for id, def in pairs(BlockDef) do
 			if def.Hardness and not def.ExplosiveOnly and (def.Hardness / hard) <= limit and def.Types then
 				local isGem = def.Types.Gem == true
 				local isOre = def.Types.Ore == true and not isGem  -- Gem wins
 				local v = def.Value or 0
 				if isGem then
-					if not topGem or v > topGem.value then
-						topGem = { id = id, value = v, name = def.Name }
-					end
+					table.insert(gems, { id = id, value = v, name = def.Name })
 				elseif isOre then
-					if not topOre or v > topOre.value then
-						topOre = { id = id, value = v, name = def.Name }
-					end
+					table.insert(ores, { id = id, value = v, name = def.Name })
 				end
 			end
 		end
-		farlandState.bestOre     = topOre and topOre.id or nil
-		farlandState.bestGem     = topGem and topGem.id or nil
-		farlandState.bestOreName = topOre and topOre.name or nil
-		farlandState.bestGemName = topGem and topGem.name or nil
+		table.sort(ores, function(a, b) return a.value > b.value end)
+		table.sort(gems, function(a, b) return a.value > b.value end)
+		farlandState.topOres = ores
+		farlandState.topGems = gems
+		-- top-1 kept for labels / backwards-compat
+		farlandState.bestOre     = ores[1] and ores[1].id or nil
+		farlandState.bestGem     = gems[1] and gems[1].id or nil
+		farlandState.bestOreName = ores[1] and ores[1].name or nil
+		farlandState.bestGemName = gems[1] and gems[1].name or nil
 	end
 
 	-- cached ore position index — rebuilt lazily, 10s TTL.
@@ -601,32 +607,45 @@ do
 		if not MT then return end
 		farClear()
 		computeBest()
-		if not (farlandState.bestOre or farlandState.bestGem) then return end
+		local tiers  = math.max(1, farlandState.tiers or 1)
+		local oreCap = farlandState.oreCap
+		local gemCap = math.floor(oreCap / 2)
 		local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
 		local myPos = hrp and hrp.Position or Vector3.new()
 		local idx = getIndex().byOre
-		-- O(1) hash lookup instead of full-cache scan
-		local oreCoords = idx[farlandState.bestOre] or {}
-		local gemCoords = idx[farlandState.bestGem] or {}
-		local ores, gems = table.create(#oreCoords), table.create(#gemCoords)
-		for i = 1, #oreCoords do
-			local c = oreCoords[i]
-			local wp = Terrain:CellCenterToWorld(c.X, c.Y, c.Z)
-			ores[i] = { coord = c, d2 = (wp - myPos).Magnitude ^ 2 }
+
+		-- shared per-tier renderer
+		local function renderTier(entry, perTierCap)
+			if not (entry and entry.id) then return end
+			local coords = idx[entry.id] or {}
+			if #coords == 0 then return end
+			local sorted = table.create(#coords)
+			for i = 1, #coords do
+				local c = coords[i]
+				local wp = Terrain:CellCenterToWorld(c.X, c.Y, c.Z)
+				sorted[i] = { coord = c, d2 = (wp - myPos).Magnitude ^ 2 }
+			end
+			table.sort(sorted, function(a, b) return a.d2 < b.d2 end)
+			local color = ORE_COLORS[entry.id] or Color3.fromRGB(255,255,255)
+			for i = 1, math.min(perTierCap, #sorted) do
+				makeFarMarker(sorted[i].coord, color, entry.name)
+			end
 		end
-		for i = 1, #gemCoords do
-			local c = gemCoords[i]
-			local wp = Terrain:CellCenterToWorld(c.X, c.Y, c.Z)
-			gems[i] = { coord = c, d2 = (wp - myPos).Magnitude ^ 2 }
+
+		-- ORE tiers (top-N)
+		if farlandState.showOres and farlandState.topOres then
+			local perTier = math.max(1, math.ceil(oreCap / tiers))
+			for t = 1, math.min(tiers, #farlandState.topOres) do
+				renderTier(farlandState.topOres[t], perTier)
+			end
 		end
-		table.sort(ores, function(a, b) return a.d2 < b.d2 end)
-		table.sort(gems, function(a, b) return a.d2 < b.d2 end)
-		local oreCap = farlandState.oreCap
-		local gemCap = math.floor(oreCap / 2)
-		local oreColor = ORE_COLORS[farlandState.bestOre] or Color3.fromRGB(255,255,255)
-		local gemColor = ORE_COLORS[farlandState.bestGem] or Color3.fromRGB(255,255,255)
-		for i = 1, math.min(oreCap, #ores) do makeFarMarker(ores[i].coord, oreColor, farlandState.bestOreName) end
-		for i = 1, math.min(gemCap, #gems) do makeFarMarker(gems[i].coord, gemColor, farlandState.bestGemName) end
+		-- GEM tiers (top-N)
+		if farlandState.showGems and farlandState.topGems then
+			local perTier = math.max(1, math.ceil(gemCap / tiers))
+			for t = 1, math.min(tiers, #farlandState.topGems) do
+				renderTier(farlandState.topGems[t], perTier)
+			end
+		end
 	end
 
 	local farSection = tab:Section("farland (best-ore global ESP)")
@@ -642,6 +661,28 @@ do
 		Default = farlandState.oreCap, Min = 2, Max = 60, Step = 2,
 		Callback = function(v)
 			farlandState.oreCap = v
+			if farlandState.active then farScan() end
+		end,
+	})
+	local farTiersCtl = farSection:Int("farland_tiers", {
+		Label = "tiers (top-N by value)",
+		Default = farlandState.tiers, Min = 1, Max = 5, Step = 1,
+		Callback = function(v)
+			farlandState.tiers = v
+			if farlandState.active then farScan() end
+		end,
+	})
+	local farShowOreCtl = farSection:Toggle("farland_show_ores", {
+		Label = "show ores", Default = true,
+		Callback = function(v)
+			farlandState.showOres = v
+			if farlandState.active then farScan() end
+		end,
+	})
+	local farShowGemCtl = farSection:Toggle("farland_show_gems", {
+		Label = "show gems", Default = true,
+		Callback = function(v)
+			farlandState.showGems = v
 			if farlandState.active then farScan() end
 		end,
 	})
@@ -724,7 +765,10 @@ do
 		end
 	end
 	bag.hooks.farland_resync = function()
-		farlandState.oreCap = farCapCtl:Get() or farlandState.oreCap
+		farlandState.oreCap   = farCapCtl:Get()      or farlandState.oreCap
+		farlandState.tiers    = farTiersCtl:Get()    or farlandState.tiers
+		farlandState.showOres = farShowOreCtl:Get()
+		farlandState.showGems = farShowGemCtl:Get()
 		if farToggleCtrl:Get() then
 			farlandState.active = true
 			task.spawn(farScan)
@@ -924,14 +968,11 @@ do
 end
 
 -- ============================================================
---  TAB — WAYPOINTS (recall own car + per-key TPs)
+--  TAB — VEHICLE (flip 180°; helpers for flinger)
+--  waypoints removed — was unstable (void-send after truck purchase)
 -- ============================================================
 do
-	local HS2 = HS  -- reuse HttpService alias from top
-	local WP_PATH   = "BloomUI/vehicle_waypoints.json"
-	local TP_Y_LIFT = 5
-
-	-- helpers
+	-- helpers (preserved for flinger via _G.__umtVFHelpers)
 	local function myVehicleHere()
 		if not VC then return nil end
 		return VC.CurrentDrivenVehicle
@@ -968,206 +1009,38 @@ do
 		return true
 	end
 
-	-- waypoints shape: [name] = { cf = {12 CFrame components}, key = "KeyCodeName" or "" }
-	local waypoints = {}
-
-	local function loadWaypoints()
-		if not (isfile and readfile and isfile(WP_PATH)) then return end
-		local ok, data = pcall(readfile, WP_PATH)
-		if not ok then return end
-		local ok2, parsed = pcall(function() return HS2:JSONDecode(data) end)
-		if ok2 and type(parsed) == "table" then
-			waypoints = parsed
-			-- migrate old flat-array format
-			for name, v in pairs(waypoints) do
-				if type(v) == "table" and v[1] and not v.cf then
-					waypoints[name] = { cf = v, key = "" }
-				end
-			end
-		end
-	end
-
-	local function saveWaypoints()
-		if not writefile then return end
-		pcall(function() writefile(WP_PATH, HS2:JSONEncode(waypoints)) end)
-	end
-
-	local function labelOf(name)
-		local wp = waypoints[name]
-		if wp and wp.key and wp.key ~= "" and wp.key ~= "Unknown" then
-			return name .. "  [" .. wp.key .. "]"
-		end
-		return name
-	end
-
-	local function nameFromLabel(label)
-		if not label or label == "" then return nil end
-		return (label:gsub("%s%s%[.-%]$", ""))
-	end
-
-	local function waypointLabels()
-		local out = {}
-		for name in pairs(waypoints) do table.insert(out, labelOf(name)) end
-		table.sort(out)
-		return out
-	end
-
-	local function teleportTo(name)
-		local wp = waypoints[name]
-		if not wp or not wp.cf then return false, "no such waypoint" end
-		local vb = myVehicleHere(); if not vb then return false, "sit in your car first" end
-		local target = CFrame.new(unpack(wp.cf)) + Vector3.new(0, TP_Y_LIFT, 0)
-		return pivotWithAnchorDance(vb.Model, target)
-	end
-
-	loadWaypoints()
-
-	local tab = mod:Tab({ Name = "waypoints" })
-
-	-- recall section
-	local secRecall = tab:Section("recall my car")
-	local function bringMyCar()
+	-- flip the current vehicle 180° around its local Y axis (turn around in place)
+	local function flipVehicle180()
 		local vb = myVehicleHere()
-		if not vb then notify("recall", "no driven vehicle", "error") return end
-		local hrp = myHrp()
-		if not hrp then notify("recall", "no character", "error") return end
-		pivotWithAnchorDance(vb.Model, hrp.CFrame * CFrame.new(0, 3, -8))
-		notify("recalled", "car in front", "success")
+		local model = vb and vb.Model
+		local pp    = model and model.PrimaryPart
+		if not pp then
+			notify("flip", "no driven vehicle", "error"); return
+		end
+		local cf   = pp.CFrame
+		-- rotate 180° around world-up at the vehicle's position (preserves XZ pos + roll)
+		local newCF = CFrame.new(cf.Position) * CFrame.Angles(0, math.pi, 0) * (cf - cf.Position)
+		-- lift slightly to avoid ground clipping on the flip
+		newCF = newCF + Vector3.new(0, 2, 0)
+		pivotWithAnchorDance(model, newCF)
+		notify("flip", "rotated 180°", "success")
 	end
-	secRecall:Button("recall_bring", {
-		Text = "bring my car in front of me",
-		Primary = true,
-		Callback = bringMyCar,
-	})
-	secRecall:Keybind("recall_key", {
-		Label = "recall key",
-		Default = Enum.KeyCode.B,
-		OnPress = bringMyCar,
-	})
 
-	-- new waypoint section
-	local secAdd = tab:Section("new waypoint")
-	local dropdown
-	local keybindCtrl
-
-	local nameInput = secAdd:String("wp_name", {
-		Label = "name", Default = "", Placeholder = "my spot",
+	-- UI
+	local tab = mod:Tab({ Name = "vehicle" })
+	local sec = tab:Section("controls")
+	sec:Label("Flip 180° — rotate your car in place (hotkey: T)")
+	sec:Button("vehicle_flip", {
+		Text = "flip 180° now",
+		Callback = flipVehicle180,
 	})
-	secAdd:Button("wp_save", {
-		Text = "save current car position",
-		Primary = true,
-		Callback = function()
-			local name = (nameInput:Get() or ""):gsub("^%s+", ""):gsub("%s+$", "")
-			if name == "" then notify("waypoints", "enter a name first", "error") return end
-			local pp = myPrimary()
-			if not pp then notify("waypoints", "no driven vehicle", "error") return end
-			local prevKey = (waypoints[name] and waypoints[name].key) or ""
-			waypoints[name] = { cf = { pp.CFrame:GetComponents() }, key = prevKey }
-			saveWaypoints()
-			notify("saved", name, "success")
-			if dropdown then
-				dropdown:SetOptions(waypointLabels())
-				dropdown:Set(labelOf(name))
-			end
-		end,
-	})
+	sec:Label("waypoints removed — recall was unstable (Ohio event)")
 
-	-- saved list section
-	local secList = tab:Section("saved waypoints")
-
-	local initial = waypointLabels()
-	if #initial == 0 then initial = { "(none saved)" } end
-
-	dropdown = secList:Enum("wp_pick", {
-		Label = "waypoint", Options = initial, Default = initial[1],
-		Callback = function(label)
-			if not keybindCtrl then return end
-			local name = nameFromLabel(label)
-			local wp = name and waypoints[name]
-			local keyName = wp and wp.key or ""
-			if keyName ~= "" and keyName ~= "Unknown" then
-				local ok, k = pcall(function() return Enum.KeyCode[keyName] end)
-				if ok and k then keybindCtrl:Set(k, true); return end
-			end
-			keybindCtrl:Set(Enum.KeyCode.Unknown, true)
-		end,
-	})
-
-	keybindCtrl = secList:Keybind("wp_set_key", {
-		Label = "key for selected (empty = none)",
-		Default = Enum.KeyCode.Unknown,
-		OnPress = function() end,
-	})
-
-	keybindCtrl.Changed:Connect(function()
-		local sel = dropdown:Get()
-		local name = nameFromLabel(sel)
-		local wp = name and waypoints[name]
-		if not wp then return end
-		local key = keybindCtrl:Get()
-		local keyName = (typeof(key) == "EnumItem" and key.Name) or ""
-		if keyName == "Unknown" then keyName = "" end
-		if wp.key == keyName then return end
-		wp.key = keyName
-		saveWaypoints()
-		dropdown:SetOptions(waypointLabels())
-		dropdown:Set(labelOf(name))
-	end)
-
-	secList:Button("wp_tp", {
-		Text = "teleport to selected",
-		Primary = true,
-		Callback = function()
-			local sel = dropdown:Get()
-			if not sel or sel == "(none saved)" then
-				notify("waypoints", "pick one first", "error") return
-			end
-			local name = nameFromLabel(sel)
-			local ok, err = teleportTo(name)
-			if ok then notify("tp'd", name, "success")
-			else notify("tp failed", err or "?", "error") end
-		end,
-	})
-	secList:Button("wp_delete", {
-		Text = "delete selected",
-		Danger = true,
-		Callback = function()
-			local sel = dropdown:Get()
-			if not sel or sel == "(none saved)" then return end
-			local name = nameFromLabel(sel)
-			if not name then return end
-			waypoints[name] = nil
-			saveWaypoints()
-			local list = waypointLabels()
-			if #list == 0 then list = { "(none saved)" } end
-			dropdown:SetOptions(list)
-			dropdown:Set(list[1])
-			notify("deleted", name, "info")
-		end,
-	})
-	secList:Button("wp_refresh", {
-		Text = "reload from disk",
-		Callback = function()
-			loadWaypoints()
-			local list = waypointLabels()
-			if #list == 0 then list = { "(none saved)" } end
-			dropdown:SetOptions(list)
-			dropdown:Set(list[1])
-			notify("reloaded", #list .. " waypoints", "info")
-		end,
-	})
-
-	-- global quick-tp listener for all waypoint keys
-	mod:Connect(UIS.InputBegan, function(input, gpe)
+	-- T hotkey (default)
+	UIS.InputBegan:Connect(function(input, gpe)
 		if gpe then return end
-		if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
-		local kname = input.KeyCode.Name
-		if kname == "Unknown" then return end
-		for name, wp in pairs(waypoints) do
-			if wp.key == kname then
-				teleportTo(name)
-				break
-			end
+		if input.KeyCode == Enum.KeyCode.T then
+			flipVehicle180()
 		end
 	end)
 
