@@ -1416,5 +1416,5 @@ mod:OnConfigLoaded(function(ok)
 end)
 
 _G.__umtClaim = nil  -- release concurrency lock
-print("[UMT] umt toolkit v1.1 loaded — 6 tabs ready")
+print("[UMT] umt toolkit v2.0 loaded — 6 tabs ready")
 notify("umt toolkit", "loaded — 4 tabs", "success")
