@@ -4,8 +4,9 @@
 	Unload the module to deload the whole script cleanly.
 ]]
 
-local BLOOM_URL   = "https://raw.githubusercontent.com/NanoBlazeDev/Roblox/refs/heads/main/UI/bloom-ui-lib.lua"
-local TOOLKIT_URL = "https://raw.githubusercontent.com/NanoBlazeDev/Roblox/refs/heads/main/modules/UMT.lua"
+-- cache-bust via ?t=tick() so Velocity + GitHub edge CDN both re-fetch each inject
+local BLOOM_URL   = "https://raw.githubusercontent.com/NanoBlazeDev/Roblox/refs/heads/main/UI/bloom-ui-lib.lua?t=" .. tick()
+local TOOLKIT_URL = "https://raw.githubusercontent.com/NanoBlazeDev/Roblox/refs/heads/main/modules/UMT.lua?t=" .. tick()
 
 -- ============================================================
 --  CONCURRENCY GUARD — stop two parallel injections from both passing
@@ -150,7 +151,7 @@ local okMod, mod = pcall(function()
 		Name        = "umt toolkit",
 		Version     = "2.0",
 		Author      = "ExaVolt",
-		Description = "ultimate mining tycoon tools — ore xray, vehicle boost, vehicle flip, flinger, fastmine, server hop",
+		Description = "ultimate mining tycoon tools — ore xray, vehicle boost, flip+bring, flinger, fastmine, server hop",
 		AutoConfig  = CFG_NAME,  -- Bloom owns load/save lifecycle for us
 	})
 end)
@@ -1026,21 +1027,46 @@ do
 		notify("flip", "rotated 180°", "success")
 	end
 
+	-- bring vehicle to the player's current position (recall)
+	-- undetected: uses anchor-dance which the server treats as owner-authoritative movement
+	local function bringVehicleHere()
+		local vb = myVehicleHere()
+		local model = vb and vb.Model
+		if not (model and model.PrimaryPart) then
+			notify("bring", "no owned vehicle", "error"); return
+		end
+		local hrp = myHrp()
+		if not hrp then
+			notify("bring", "no character", "error"); return
+		end
+		-- place behind the player, facing same way, a few studs back + lifted
+		local hCF = hrp.CFrame
+		local target = hCF * CFrame.new(0, 3, -6)  -- behind player, +3y lift
+		pivotWithAnchorDance(model, target)
+		notify("bring", "vehicle recalled", "success")
+	end
+
 	-- UI
 	local tab = mod:Tab({ Name = "vehicle" })
 	local sec = tab:Section("controls")
-	sec:Label("Flip 180° — rotate your car in place (hotkey: T)")
+	sec:Label("Flip 180° — rotate car in place (hotkey: T)")
 	sec:Button("vehicle_flip", {
 		Text = "flip 180° now",
 		Callback = flipVehicle180,
 	})
-	sec:Label("waypoints removed — recall was unstable (Ohio event)")
+	sec:Label("Bring — teleport car to you (hotkey: V)")
+	sec:Button("vehicle_bring", {
+		Text = "bring vehicle here",
+		Callback = bringVehicleHere,
+	})
 
-	-- T hotkey (default)
+	-- hotkeys: T = flip, V = bring
 	UIS.InputBegan:Connect(function(input, gpe)
 		if gpe then return end
 		if input.KeyCode == Enum.KeyCode.T then
 			flipVehicle180()
+		elseif input.KeyCode == Enum.KeyCode.V then
+			bringVehicleHere()
 		end
 	end)
 
