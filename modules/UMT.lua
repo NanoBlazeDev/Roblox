@@ -1195,14 +1195,16 @@ do
 	-- actual time taken. speed_mult = credit / vanilla_time (no user cap).
 	-- credit itself is capped only to prevent one-session infinite accumulation.
 	local SMART_CREDIT_CAP = 60   -- max seconds of credit we'll ever hold
+	local SMART_DEDUCT_MIN = 0.3  -- min seconds between credit deductions
+	                              -- (prevents MTF display polls from draining credit)
 	local state = {
-		active   = false,
-		mode     = "static",
-		mult     = 0.75,          -- static multiplier
-		credit   = 0,             -- smart: accumulated idle credit
-		lastT    = 0,
-		lastMult = 1,             -- smart: last applied speed_mult (for UI)
-		oldMTF   = nil,
+		active     = false,
+		mode       = "static",
+		mult       = 0.75,         -- static multiplier
+		credit     = 0,            -- smart: accumulated idle credit
+		lastDeduct = 0,            -- smart: last time we spent credit (anti-poll)
+		lastMult   = 1,            -- smart: last applied speed_mult (for UI)
+		oldMTF     = nil,
 	}
 
 	local function enable()
@@ -1218,7 +1220,13 @@ do
 				return vanilla * state.mult
 			else
 				local speedMult = (vanilla > 0) and math.max(1, state.credit / vanilla) or 1
-				state.credit = math.max(0, state.credit - vanilla)
+				-- throttle: only deduct credit once per SMART_DEDUCT_MIN sec,
+				-- so poll calls don't drain the bucket
+				local now = tick()
+				if now - state.lastDeduct >= SMART_DEDUCT_MIN then
+					state.credit = math.max(0, state.credit - vanilla)
+					state.lastDeduct = now
+				end
 				state.lastMult = speedMult
 				return vanilla / speedMult
 			end
@@ -1266,6 +1274,7 @@ do
 
 	local RS = game:GetService("RunService")
 	if _G.__umt_fastmine_live then pcall(function() _G.__umt_fastmine_live:Disconnect() end) end
+	local lastDiag = 0
 	_G.__umt_fastmine_live = RS.Heartbeat:Connect(function(dt)
 		if state.active and state.mode == "smart" then
 			-- refill credit continuously in real time (not only on mine events)
@@ -1273,6 +1282,12 @@ do
 			pcall(function()
 				liveLbl:SetText(string.format("credit: %.1fs   last mult: %.1fx", state.credit, state.lastMult))
 			end)
+		end
+		-- diagnostic: every 2 sec, print state so we can see WHY credit is 0
+		if tick() - lastDiag > 2 then
+			lastDiag = tick()
+			print(string.format("[fastmine] active=%s mode=%s credit=%.2f lastMult=%.2f",
+				tostring(state.active), tostring(state.mode), state.credit, state.lastMult))
 		end
 	end)
 	registerTeardown(function()
