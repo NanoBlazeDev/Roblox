@@ -1201,7 +1201,6 @@ do
 		active       = false,
 		mode         = "static",
 		mult         = 0.75,         -- static multiplier
-		lastBh       = nil,          -- smart: last block MTF was called for
 		lastMineAt   = 0,            -- smart: tick() when last block mined
 		lastVanilla  = 1,            -- smart: for UI
 		lastMult     = 1,            -- smart: last applied speed_mult (for UI)
@@ -1221,19 +1220,20 @@ do
 				return vanilla * state.mult
 			else
 				state.lastVanilla = vanilla
-				local isNewBlock = (bh ~= state.lastBh)
-				if isNewBlock then state.lastBh = bh end
 				local now = tick()
 				local idle = now - state.lastMineAt
-				-- idle at least 1 vanilla worth → one instant block; else vanilla.
-				-- human factor: 0.95× vanilla on sustained mining (slight boost)
+				-- idle at least 1 vanilla worth → one instant block; else vanilla
+				-- human factor: 0.95× vanilla on sustained mining
 				local actual
 				if idle >= vanilla then
 					actual = vanilla * 0.1       -- instant burst
 				else
 					actual = vanilla * 0.95       -- human factor
 				end
-				if isNewBlock then state.lastMineAt = now end
+				-- update timestamp on EVERY call (poll or real mine). Active play
+				-- resets idle to ~0; walking away lets it grow. First call after
+				-- a gap gets the burst, nothing after it until next gap.
+				state.lastMineAt = now
 				state.lastMult = (actual > 0) and (vanilla / actual) or 1
 				return actual
 			end
