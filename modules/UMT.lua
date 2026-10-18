@@ -1195,14 +1195,12 @@ do
 	-- actual time taken. speed_mult = credit / vanilla_time (no user cap).
 	-- credit itself is capped only to prevent one-session infinite accumulation.
 	local SMART_CREDIT_CAP = 60   -- max seconds of credit we'll ever hold
-	local SMART_DEDUCT_MIN = 0.3  -- min seconds between credit deductions
-	                              -- (prevents MTF display polls from draining credit)
 	local state = {
 		active     = false,
 		mode       = "static",
 		mult       = 0.75,         -- static multiplier
 		credit     = 0,            -- smart: accumulated idle credit
-		lastDeduct = 0,            -- smart: last time we spent credit (anti-poll)
+		lastBh     = nil,          -- smart: last block MTF was called for
 		lastMult   = 1,            -- smart: last applied speed_mult (for UI)
 		oldMTF     = nil,
 	}
@@ -1220,16 +1218,19 @@ do
 				return vanilla * state.mult
 			else
 				-- credit = earned time server allows us to skip. Spend up to
-				-- min(credit, vanilla) and the mine returns (vanilla - spent).
-				-- vanilla=100, credit=60 → mine in 40s; vanilla=1, credit=60 → 0s.
-				local spent = math.min(state.credit, vanilla)
+				-- min(credit, vanilla) and the mine returns (vanilla - spent),
+				-- but never faster than 10% of vanilla (prevents anti-cheat trip).
+				-- Also: UMT calls MTF many times per block for display polling,
+				-- so we deduct only when bh (block handle) differs from last.
+				local floor = vanilla * 0.1
+				local maxSpent = vanilla - floor
+				local spent = math.min(state.credit, maxSpent)
 				local actual = vanilla - spent
-				local now = tick()
-				if now - state.lastDeduct >= SMART_DEDUCT_MIN then
+				if bh ~= state.lastBh then
 					state.credit = math.max(0, state.credit - spent)
-					state.lastDeduct = now
+					state.lastBh = bh
 				end
-				state.lastMult = (actual > 0) and (vanilla / actual) or 999
+				state.lastMult = (actual > 0) and (vanilla / actual) or 1
 				return actual
 			end
 		end)
