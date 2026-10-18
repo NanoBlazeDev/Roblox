@@ -149,9 +149,9 @@ local CFG_NAME = "umt_default"  -- config slot name inside Bloom's shared config
 local okMod, mod = pcall(function()
 	return Bloom:Module({
 		Name        = "umt toolkit",
-		Version     = "2.0",
+		Version     = "2.1",
 		Author      = "ExaVolt",
-		Description = "ultimate mining tycoon tools — ore xray, vehicle boost, flip+bring, flinger, fastmine, server hop",
+		Description = "ultimate mining tycoon tools — ore xray, vehicle boost, flip+bring+drill-lock, flinger, fastmine, server hop",
 		AutoConfig  = CFG_NAME,  -- Bloom owns load/save lifecycle for us
 	})
 end)
@@ -1046,33 +1046,96 @@ do
 		notify("bring", "vehicle recalled", "success")
 	end
 
+	-- Drill Lock Mode: snap vehicle's X-axis rotation (pitch) to nearest 90°
+	-- useful for Exa Drill: car wants to drill straight, physics tilts it, this keeps it clean
+	local drillLock = { active = false, conn = nil }
+	local function stopDrillLock()
+		if drillLock.conn then pcall(function() drillLock.conn:Disconnect() end) end
+		drillLock.conn = nil
+		drillLock.active = false
+	end
+	registerTeardown(stopDrillLock)
+
+	local function startDrillLock()
+		if drillLock.active then return end
+		drillLock.active = true
+		local RunSvc = game:GetService("RunService")
+		local DEG2RAD = math.pi / 180
+		drillLock.conn = RunSvc.Heartbeat:Connect(function()
+			if not drillLock.active or _G.__umtSession ~= SESSION then stopDrillLock() return end
+			local vb = myVehicleHere()
+			local model = vb and vb.Model
+			local pp = model and model.PrimaryPart
+			if not pp then return end
+			local ori = pp.Orientation  -- Vector3 degrees (X pitch, Y yaw, Z roll)
+			local snapped = math.round(ori.X / 90) * 90
+			if math.abs(ori.X - snapped) > 1.5 then
+				local pos = pp.CFrame.Position
+				local newCF = CFrame.new(pos) * CFrame.fromOrientation(snapped * DEG2RAD, ori.Y * DEG2RAD, ori.Z * DEG2RAD)
+				pcall(function()
+					model:PivotTo(newCF)
+					for _, p in ipairs(model:GetDescendants()) do
+						if p:IsA("BasePart") then
+							local av = p.AssemblyAngularVelocity
+							p.AssemblyAngularVelocity = Vector3.new(0, av.Y, av.Z)
+						end
+					end
+				end)
+			end
+		end)
+	end
+
+	local drillLockToggle  -- forward decl so hotkey can flip toggle UI state too
+	local function toggleDrillLock()
+		local newVal = not drillLock.active
+		if drillLockToggle then drillLockToggle:Set(newVal) else
+			if newVal then startDrillLock() else stopDrillLock() end
+			notify("drill lock", newVal and "ON — pitch locked to 90° steps" or "OFF",
+				newVal and "success" or "info")
+		end
+	end
+
 	-- UI
 	local tab = mod:Tab({ Name = "vehicle" })
 	local sec = tab:Section("controls")
-	sec:Label("Flip 180° — rotate car in place (hotkey: T)")
+
+	sec:Label("Flip 180° — rotate car in place")
 	sec:Button("vehicle_flip", {
 		Text = "flip 180° now",
 		Callback = flipVehicle180,
 	})
-	sec:Label("Bring — teleport car to you (hotkey: V)")
+	sec:Keybind("hotkey_flip", {
+		Label = "flip hotkey",
+		Default = Enum.KeyCode.T,
+		OnPress = flipVehicle180,
+	})
+
+	sec:Label("Bring — teleport car to you")
 	sec:Button("vehicle_bring", {
 		Text = "bring vehicle here",
 		Callback = bringVehicleHere,
 	})
+	sec:Keybind("hotkey_bring", {
+		Label = "bring hotkey",
+		Default = Enum.KeyCode.V,
+		OnPress = bringVehicleHere,
+	})
 
-	-- hotkeys: T = flip, V = bring
-	local hotkeyConn = UIS.InputBegan:Connect(function(input, gpe)
-		if gpe then return end
-		if input.KeyCode == Enum.KeyCode.T then
-			flipVehicle180()
-		elseif input.KeyCode == Enum.KeyCode.V then
-			bringVehicleHere()
-		end
-	end)
-	registerTeardown(function()
-		if hotkeyConn then pcall(function() hotkeyConn:Disconnect() end) end
-		hotkeyConn = nil
-	end)
+	sec:Label("Drill Lock Mode — snap pitch to nearest 90° (clean drilling)")
+	drillLockToggle = sec:Toggle("drill_lock", {
+		Text = "drill lock",
+		Default = false,
+		Callback = function(v)
+			if v then startDrillLock() else stopDrillLock() end
+			notify("drill lock", v and "ON — pitch locked to 90° steps" or "OFF",
+				v and "success" or "info")
+		end,
+	})
+	sec:Keybind("hotkey_drill_lock", {
+		Label = "drill lock hotkey",
+		Default = Enum.KeyCode.U,
+		OnPress = toggleDrillLock,
+	})
 
 	-- expose flinger helpers via upvalue capture for flinger tab below
 	_G.__umtVFHelpers = {
@@ -1446,5 +1509,5 @@ mod:OnConfigLoaded(function(ok)
 end)
 
 _G.__umtClaim = nil  -- release concurrency lock
-print("[UMT] umt toolkit v2.0 loaded — 6 tabs ready")
-notify("umt toolkit", "loaded — 4 tabs", "success")
+print("[UMT] umt toolkit v2.1 loaded — 6 tabs ready, hotkeys rebindable, drill lock on U")
+notify("umt toolkit", "loaded — 6 tabs, drill lock = U", "success")
