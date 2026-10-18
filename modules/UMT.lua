@@ -1280,7 +1280,7 @@ do
 			-- refill credit continuously in real time (not only on mine events)
 			state.credit = math.min(SMART_CREDIT_CAP, state.credit + dt)
 			pcall(function()
-				liveLbl:SetText(string.format("credit: %.1fs   last mult: %.1fx", state.credit, state.lastMult))
+				liveLbl:Set(string.format("credit: %.1fs   last mult: %.1fx", state.credit, state.lastMult))
 			end)
 		end
 		-- diagnostic: every 2 sec, print state so we can see WHY credit is 0
