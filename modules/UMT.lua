@@ -1,53 +1,31 @@
---[[
-	UMT Toolkit — one Bloom module, four tabs
-	Appears as "umt toolkit" in bloom / modules.
-	Unload the module to deload the whole script cleanly.
-]]
-
--- cache-bust via ?t=tick() so Velocity + GitHub edge CDN both re-fetch each inject
 local BLOOM_URL   = "https://raw.githubusercontent.com/NanoBlazeDev/Roblox/refs/heads/main/UI/bloom-ui-lib.lua?t=" .. tick()
 local TOOLKIT_URL = "https://raw.githubusercontent.com/NanoBlazeDev/Roblox/refs/heads/main/modules/UMT.lua?t=" .. tick()
 
--- ============================================================
---  CONCURRENCY GUARD — stop two parallel injections from both passing
---  the "no previous load" check and both wiring tabs.
--- ============================================================
 do
-	task.wait(math.random() * 0.2)  -- jitter so twin injections desync
+	task.wait(math.random() * 0.2)
 	if _G.__umtClaim then
 		local t0 = tick()
 		while _G.__umtClaim and (tick() - t0) < 10 do task.wait(0.05) end
-		-- the other load finished setup — bail; it already built everything
+
 		if _G.__umtToolkit then return end
 	end
-	_G.__umtClaim = true  -- claim BEFORE any yielding call below
+	_G.__umtClaim = true
 end
 
--- ============================================================
---  HARD KILL — authoritative teardown of ANY previous UMT load.
---  Must not rely on Bloom's module lifecycle (which may have been
---  singleton-swapped out from under the old module).
--- ============================================================
 do
-	-- 1. flip the shared session token so every old loop exits on next tick.
-	--    old loops do `while _G.__umtSession == myToken`; mismatch → break.
-	_G.__umtSession = {}  -- new unique table; old loops' myToken ~= this
 
-	-- 2. call any registered teardown fns (xray/farland/boost/fling/fastmine/autosave)
+	_G.__umtSession = {}
+
 	if _G.__umtTeardowns then
 		for _, fn in ipairs(_G.__umtTeardowns) do pcall(fn) end
 	end
 	_G.__umtTeardowns = {}
 
-	-- 3. nuke any UMT folders in workspace left behind
 	for _, name in ipairs({ "UMT_XRay", "UMT_Farland", "UMT_Waypoint" }) do
 		local f = workspace:FindFirstChild(name)
 		while f do pcall(function() f:Destroy() end); f = workspace:FindFirstChild(name) end
 	end
 
-	-- 4. unhook fastmine unconditionally if it was ever hooked.
-	--    __umt_mtf_hooked stores { target, original } so we can always
-	--    restore to the TRUE original even if someone double-hooked.
 	if _G.__umt_mtf_hooked and hookfunction then
 		pcall(function()
 			hookfunction(_G.__umt_mtf_hooked.target, _G.__umt_mtf_hooked.original)
@@ -55,19 +33,14 @@ do
 		_G.__umt_mtf_hooked = nil
 	end
 
-	-- 5. fallback: call old legacy cleanup if present
 	if _G.__umtToolkit then pcall(_G.__umtToolkit) end
 	_G.__umtToolkit = nil
 
-	-- give yielded loops one frame to actually exit before we build new state
 	task.wait()
 end
 
-local SESSION = _G.__umtSession  -- the token this load owns; loops check against it
+local SESSION = _G.__umtSession
 
--- re-fire this toolkit after every teleport (server hop, rejoin, map change)
--- so the UI survives the transition and the user doesn't have to re-inject.
--- 5 retries with 1s backoff; on final failure show a Roblox notification.
 local q = queue_on_teleport or queueonteleport or syn and syn.queue_on_teleport
 if q then
 	pcall(q, string.format([[
@@ -141,18 +114,15 @@ local BlockDef = tryReq({ "Definitions", "BlockDefinitions" })
 local Settings = tryReq({ "Settings" })
 local MT = MT_mod and MT_mod.GetInstance and MT_mod.GetInstance() or nil
 
-local CFG_NAME = "umt_default"  -- config slot name inside Bloom's shared config store
+local CFG_NAME = "umt_default"
 
--- ============================================================
---  THE MODULE
--- ============================================================
 local okMod, mod = pcall(function()
 	return Bloom:Module({
 		Name        = "umt toolkit",
-		Version     = "2.3",
+		Version     = "2.1",
 		Author      = "ExaVolt",
 		Description = "ultimate mining tycoon tools — ore xray, vehicle boost, flip+bring+drill-lock, flinger, fastmine, server hop",
-		AutoConfig  = CFG_NAME,  -- Bloom owns load/save lifecycle for us
+		AutoConfig  = CFG_NAME,
 	})
 end)
 if not okMod or not mod then
@@ -166,18 +136,13 @@ local function notify(title, text, kind)
 	end)
 end
 
--- shared cleanup bag
 local bag = { folders = {}, flags = {}, hooks = {} }
 
--- register a teardown fn that a FUTURE reload's hard-kill will call even if
--- Bloom's module lifecycle never fires. keep each fn pcall-safe + idempotent.
 local function registerTeardown(fn)
 	_G.__umtTeardowns = _G.__umtTeardowns or {}
 	table.insert(_G.__umtTeardowns, fn)
 end
 
--- master kill — flips all local loop flags so any surviving old loop in THIS
--- closure exits even if session-token check missed a tick.
 registerTeardown(function()
 	bag.flags.xrayAlive = false
 	bag.flags.hardWatchAlive = false
@@ -187,9 +152,6 @@ registerTeardown(function()
 	table.clear(bag.folders)
 end)
 
--- ============================================================
---  TAB — ORE XRAY
--- ============================================================
 do
 	local tab = mod:Tab({ Name = "xray" })
 	local sec = tab:Section("highlights")
@@ -200,43 +162,42 @@ do
 	folder.Parent = Workspace
 	table.insert(bag.folders, folder)
 
-	-- incremental highlight tracking: coord-key → {part, box}
 	local shown = {}
 	local function keyOf(c) return c.X * 1000000 + c.Y * 1000 + c.Z end
 
 	local ORE_COLORS = {
-		-- ores (wiki-matched)
-		Tin           = Color3.fromRGB(215, 210, 180),  -- pale cream nuggets
-		Iron          = Color3.fromRGB(220, 110,  40),  -- rust orange
-		Lead          = Color3.fromRGB( 25,  25,  30),  -- near-black splotches
-		Cobalt        = Color3.fromRGB( 40,  95, 220),  -- bright royal blue
-		Aluminium     = Color3.fromRGB(230, 230, 235),  -- white crystal shards
-		Silver        = Color3.fromRGB(210, 220, 230),  -- bright silver-white
-		Uranium       = Color3.fromRGB(140, 240,  90),  -- radioactive neon green
-		Vanadium      = Color3.fromRGB(170,  50,  40),  -- dark burgundy red
-		Titanium      = Color3.fromRGB(100,  80, 170),  -- purple-blue
-		Gold          = Color3.fromRGB(255, 215,  70),  -- bright yellow gold
-		Tungsten      = Color3.fromRGB(110, 140,  70),  -- olive mossy green
-		Molybdenum    = Color3.fromRGB(170, 185, 170),  -- pale silver-green
-		Plutonium     = Color3.fromRGB( 40, 190, 255),  -- glowing cyan
-		Palladium     = Color3.fromRGB(240, 190,  40),  -- bright gold-yellow
-		Iridium       = Color3.fromRGB(200, 220, 240),  -- pale ice blue-white
-		Adamantium    = Color3.fromRGB( 80, 220, 140),  -- bright green
-		Thorium       = Color3.fromRGB(130, 220, 110),  -- lime green on purple
-		Mithril       = Color3.fromRGB( 60, 220, 150),  -- vivid mint green
-		Rhodium       = Color3.fromRGB(255, 130,  40),  -- hot orange glow
-		Unobtainium   = Color3.fromRGB(255,  70, 240),  -- neon magenta
-		-- gems (wiki-matched)
-		Topaz         = Color3.fromRGB(245, 215,  70),  -- bright yellow
-		Emerald       = Color3.fromRGB( 20, 180,  60),  -- vivid green
-		Sapphire      = Color3.fromRGB( 30,  60, 230),  -- deep blue
-		Ruby          = Color3.fromRGB(220,  25,  25),  -- bright red
-		Diamond       = Color3.fromRGB(120, 220, 230),  -- cyan crystal
-		Poudretteite  = Color3.fromRGB(230,  70, 230),  -- magenta pink
-		Zultanite     = Color3.fromRGB(230, 140, 140),  -- salmon pink
-		Grandidierite = Color3.fromRGB( 70, 210, 140),  -- teal green
-		Musgravite    = Color3.fromRGB( 60, 100, 100),  -- dark teal
-		Painite       = Color3.fromRGB(210,  60,  60),  -- deep crimson
+
+		Tin           = Color3.fromRGB(215, 210, 180),
+		Iron          = Color3.fromRGB(220, 110,  40),
+		Lead          = Color3.fromRGB( 25,  25,  30),
+		Cobalt        = Color3.fromRGB( 40,  95, 220),
+		Aluminium     = Color3.fromRGB(230, 230, 235),
+		Silver        = Color3.fromRGB(210, 220, 230),
+		Uranium       = Color3.fromRGB(140, 240,  90),
+		Vanadium      = Color3.fromRGB(170,  50,  40),
+		Titanium      = Color3.fromRGB(100,  80, 170),
+		Gold          = Color3.fromRGB(255, 215,  70),
+		Tungsten      = Color3.fromRGB(110, 140,  70),
+		Molybdenum    = Color3.fromRGB(170, 185, 170),
+		Plutonium     = Color3.fromRGB( 40, 190, 255),
+		Palladium     = Color3.fromRGB(240, 190,  40),
+		Iridium       = Color3.fromRGB(200, 220, 240),
+		Adamantium    = Color3.fromRGB( 80, 220, 140),
+		Thorium       = Color3.fromRGB(130, 220, 110),
+		Mithril       = Color3.fromRGB( 60, 220, 150),
+		Rhodium       = Color3.fromRGB(255, 130,  40),
+		Unobtainium   = Color3.fromRGB(255,  70, 240),
+
+		Topaz         = Color3.fromRGB(245, 215,  70),
+		Emerald       = Color3.fromRGB( 20, 180,  60),
+		Sapphire      = Color3.fromRGB( 30,  60, 230),
+		Ruby          = Color3.fromRGB(220,  25,  25),
+		Diamond       = Color3.fromRGB(120, 220, 230),
+		Poudretteite  = Color3.fromRGB(230,  70, 230),
+		Zultanite     = Color3.fromRGB(230, 140, 140),
+		Grandidierite = Color3.fromRGB( 70, 210, 140),
+		Musgravite    = Color3.fromRGB( 60, 100, 100),
+		Painite       = Color3.fromRGB(210,  60,  60),
 	}
 
 	local function clear()
@@ -266,16 +227,13 @@ do
 		shown[k] = { part = part, box = box }
 	end
 
-	-- compute which ore ids are worth showing right now
-	-- = mineable (hardness/pickaxe <= limit) AND in top-N by value
-	-- recomputed each scan so pickaxe upgrades expand the whitelist automatically
-	state.topN = 2  -- top 2 ores + top 2 gems
+	state.topN = 2
 	state.allowed = {}
 
 	local function recomputeAllowed()
 		state.allowed = {}
 		if not (MUtils and BlockDef and Settings) then
-			-- fallback: no filter, show everything with a color
+
 			for id in pairs(ORE_COLORS) do state.allowed[id] = true end
 			return
 		end
@@ -297,7 +255,7 @@ do
 
 	local function scan()
 		if state.scanning or not MT then return 0 end
-		if not state.active then return 0 end  -- toggled off between calls
+		if not state.active then return 0 end
 		state.scanning = true
 		recomputeAllowed()
 		local char = lp.Character
@@ -310,8 +268,6 @@ do
 		local R = state.radius
 		local R2 = R * R
 
-		-- iterate ONLY cells within the radius cube via :Get(coord) — O(R^3)
-		-- not :List() which iterates the entire cached mine (can be 50k+ cells)
 		local desired = {}
 		local getCell = MT._Cells.Get
 		local Cells   = MT._Cells
@@ -336,11 +292,10 @@ do
 			end
 		end
 
-		-- remove highlights for cells no longer desired (mined, out of range, wrong ore)
 		for k, _ in pairs(shown) do
 			if not desired[k] then removeAt(k) end
 		end
-		-- add any new ones
+
 		for k, info in pairs(desired) do
 			if not shown[k] then addAt(k, info.coord, info.color) end
 		end
@@ -399,9 +354,8 @@ do
 		gLbl:Set(gems[1] and string.format("gem: %s  H:%d  V:%d",
 			gems[1].name, gems[1].hardness, gems[1].value) or "gem: none")
 	end
-	refreshBest()  -- initial
+	refreshBest()
 
-	-- watch pickaxe hardness; auto-refresh labels + xray allow set when it changes
 	bag.flags.hardWatchAlive = true
 	task.spawn(function()
 		local lastHard = nil
@@ -413,13 +367,11 @@ do
 			if h ~= lastHard then
 				lastHard = h
 				refreshBest()
-				if state.active then task.spawn(scan) end  -- expand/shrink xray immediately
+				if state.active then task.spawn(scan) end
 			end
 		end
 	end)
 
-	-- adaptive poll: 0.2s when the player has moved, 0.7s when idle.
-	-- scan() iterates only the radius cube so this stays cheap.
 	bag.flags.xrayAlive = true
 	task.spawn(function()
 		local lastCellKey = nil
@@ -434,7 +386,7 @@ do
 				nowKey = c.X * 1e6 + c.Y * 1e3 + c.Z
 			end
 			if nowKey ~= lastCellKey or idleTicks >= 3 then
-				-- moved, or periodic re-sync so mined-away blocks disappear
+
 				lastCellKey = nowKey
 				idleTicks = 0
 				task.spawn(scan)
@@ -446,20 +398,16 @@ do
 		end
 	end)
 
-	-- ====================================================================
-	--  FARLAND — global scan: highlights the TOP-N mineable ores + gems
-	--  anywhere in the mine (ignoring radius). Cap keeps perf sane.
-	-- ====================================================================
 	local farlandState = {
 		active   = false,
-		oreCap   = 30,  -- gems = oreCap / 2
-		tiers    = 1,   -- how many top-N tiers of ore/gem to show
+		oreCap   = 30,
+		tiers    = 1,
 		showOres = true,
 		showGems = true,
 		folder   = nil,
-		bestOre  = nil, -- ore id (string) — kept for label backwards-compat
+		bestOre  = nil,
 		bestGem  = nil,
-		topOres  = {},  -- sorted {id, value, name} desc by value
+		topOres  = {},
 		topGems  = {},
 		bestOreName = nil,
 		bestGemName = nil,
@@ -476,10 +424,6 @@ do
 		table.clear(farShown)
 	end
 
-	-- determine the single best ore + best gem user can mine (by value).
-	-- Gem classification takes precedence over Ore (Diamond, Topaz etc are
-	-- flagged as both Types.Ore AND Types.Gem in BlockDef — treat them as
-	-- Gems to match the wiki/user expectation).
 	local function computeBest()
 		if not (MUtils and BlockDef and Settings) then return end
 		local hard = MUtils.GetPlayerPickaxeHardnessClient()
@@ -488,7 +432,7 @@ do
 		for id, def in pairs(BlockDef) do
 			if def.Hardness and not def.ExplosiveOnly and (def.Hardness / hard) <= limit and def.Types then
 				local isGem = def.Types.Gem == true
-				local isOre = def.Types.Ore == true and not isGem  -- Gem wins
+				local isOre = def.Types.Ore == true and not isGem
 				local v = def.Value or 0
 				if isGem then
 					table.insert(gems, { id = id, value = v, name = def.Name })
@@ -501,17 +445,13 @@ do
 		table.sort(gems, function(a, b) return a.value > b.value end)
 		farlandState.topOres = ores
 		farlandState.topGems = gems
-		-- top-1 kept for labels / backwards-compat
+
 		farlandState.bestOre     = ores[1] and ores[1].id or nil
 		farlandState.bestGem     = gems[1] and gems[1].id or nil
 		farlandState.bestOreName = ores[1] and ores[1].name or nil
 		farlandState.bestGemName = gems[1] and gems[1].name or nil
 	end
 
-	-- cached ore position index — rebuilt lazily, 10s TTL.
-	-- MASSIVE perf win: full MT._Cells iteration happens max once per 10s
-	-- instead of every farScan (which was every 5s), AND lookups are O(1)
-	-- hash by ore id instead of O(n) full-cache scan.
 	local idxCache = { ts = 0, byOre = {}, counts = {} }
 	local INDEX_TTL = 10
 
@@ -540,13 +480,9 @@ do
 
 	local function makeFarMarker(coord, color, label)
 		local wp = Terrain:CellCenterToWorld(coord.X, coord.Y, coord.Z)
-		-- VISIBLE colored part (not invisible-part-with-adornment).
-		-- Adornments like BoxHandleAdornment only render when their adornee
-		-- is on-screen, so far-away markers invisible. Visible parts with
-		-- Material=ForceField glow at any distance and ignore adornment
-		-- rendering limits.
+
 		local part = Instance.new("Part")
-		part.Size = Vector3.new(3.9, 3.9, 3.9)  -- match actual cell size (voxel = 4 studs)
+		part.Size = Vector3.new(3.9, 3.9, 3.9)
 		part.CFrame = CFrame.new(wp)
 		part.Anchored = true
 		part.CanCollide = false
@@ -555,12 +491,11 @@ do
 		part.CastShadow = false
 		part.Transparency = 0.25
 		part.Color = color
-		part.Material = Enum.Material.ForceField  -- glows, visible from any distance
+		part.Material = Enum.Material.ForceField
 		part.TopSurface = Enum.SurfaceType.Smooth
 		part.BottomSurface = Enum.SurfaceType.Smooth
 		part.Parent = farlandState.folder
 
-		-- Highlight for ALWAYS-ON-TOP rendering through terrain
 		local hl = Instance.new("Highlight")
 		hl.Adornee = part
 		hl.FillColor = color
@@ -570,14 +505,13 @@ do
 		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 		hl.Parent = part
 
-		-- floating billboard with ore name — visible from any distance
 		if label then
 			local bg = Instance.new("BillboardGui")
 			bg.Adornee = part
 			bg.Size = UDim2.fromOffset(160, 32)
 			bg.StudsOffset = Vector3.new(0, 4, 0)
 			bg.AlwaysOnTop = true
-			bg.MaxDistance = 0  -- 0 = unlimited visibility distance
+			bg.MaxDistance = 0
 			bg.LightInfluence = 0
 			bg.Parent = part
 			local tl = Instance.new("TextLabel")
@@ -598,7 +532,6 @@ do
 		return part
 	end
 
-	-- count instances of a given ore id in the whole cache
 	local function countOnServer(oreId)
 		if not oreId or not MT then return 0 end
 		return getIndex().counts[oreId] or 0
@@ -615,7 +548,6 @@ do
 		local myPos = hrp and hrp.Position or Vector3.new()
 		local idx = getIndex().byOre
 
-		-- shared per-tier renderer
 		local function renderTier(entry, perTierCap)
 			if not (entry and entry.id) then return end
 			local coords = idx[entry.id] or {}
@@ -633,14 +565,13 @@ do
 			end
 		end
 
-		-- ORE tiers (top-N)
 		if farlandState.showOres and farlandState.topOres then
 			local perTier = math.max(1, math.ceil(oreCap / tiers))
 			for t = 1, math.min(tiers, #farlandState.topOres) do
 				renderTier(farlandState.topOres[t], perTier)
 			end
 		end
-		-- GEM tiers (top-N)
+
 		if farlandState.showGems and farlandState.topGems then
 			local perTier = math.max(1, math.ceil(gemCap / tiers))
 			for t = 1, math.min(tiers, #farlandState.topGems) do
@@ -687,15 +618,10 @@ do
 			if farlandState.active then farScan() end
 		end,
 	})
-	-- live-updating stats labels (refreshed every 5s + on hardness change)
+
 	local farOreLbl = farSection:Label("Ore: —")
 	local farGemLbl = farSection:Label("Gem: —")
 
-	-- forward-declare so the button Callback below closes over the real local
-	-- (Lua binds at closure-creation; a reference to an not-yet-declared local
-	-- becomes a global reference that stays nil forever → `attempt to call nil`
-	-- when the button is clicked. Declare the local FIRST, assign body after,
-	-- or declare and assign before any closure that uses it.)
 	local function refreshFarLabels()
 		computeBest()
 		local nOre = countOnServer(farlandState.bestOre)
@@ -707,14 +633,13 @@ do
 	farSection:Button("farland_rescan", {
 		Text = "rescan farland (rebuilds index)",
 		Callback = function()
-			getIndex(true)  -- force index rebuild
+			getIndex(true)
 			refreshFarLabels()
 			if farlandState.active then farScan() end
 			notify("farland", "index rebuilt", "info")
 		end,
 	})
 
-	-- auto-rescan every 5s: refresh labels + redraw markers if active
 	bag.flags.farAlive = true
 	local farToken = SESSION
 	task.spawn(function()
@@ -726,7 +651,6 @@ do
 		end
 	end)
 
-	-- JOIN NOTIFICATION — 10s after load, report best stuff on server
 	task.spawn(function()
 		task.wait(10)
 		computeBest()
@@ -753,10 +677,6 @@ do
 	end
 	registerTeardown(bag.hooks.xray_unload)
 
-	-- cold-start resyncs: LoadConfig silently restores toggle visuals but
-	-- skips Callbacks, so state.active, state.radius, state.topN all stay
-	-- at their Defaults even when the UI shows saved values. Pull saved
-	-- numbers into state FIRST, then enable + scan with correct params.
 	bag.hooks.xray_resync = function()
 		state.radius = radiusCtl:Get() or state.radius
 		state.topN   = topnCtl:Get()   or state.topN
@@ -777,34 +697,23 @@ do
 	end
 end
 
--- player ESP removed — the ore xray tab IS the "ore esp"
-
--- ============================================================
---  TAB — VEHICLE BOOST
--- ============================================================
 do
 	local tab = mod:Tab({ Name = "boost" })
 	local sec = tab:Section("multipliers")
 
-	-- persist boosted-model memory across reloads so re-running the script
-	-- doesn't re-multiply vehicles that are already boosted this session.
-	-- key = PerformanceFolder (survives if model is same), value = original attrs
 	_G.__umtBoosted = _G.__umtBoosted or {}
 
 	local state = {
 		enabled    = true,
 		POWER_MULT = 15, PEAK_MULT = 3, BRAKE_MULT = 15,
-		GRIP_MULT  = 2, DOWNFORCE_MULT = 1,  -- downforce grows with speed² — keep LOW to avoid suspension crush
+		GRIP_MULT  = 2, DOWNFORCE_MULT = 1,
 	}
 
 	local function boost(vb)
 		if not state.enabled then return end
 		local perf = vb.PerformanceFolder; if not perf then return end
-		if _G.__umtBoosted[perf] then return end  -- already boosted this session
+		if _G.__umtBoosted[perf] then return end
 
-		-- caller (DriverId handler) has already waited for Components.Engine
-		-- and WheeledVehicle to exist. small settle here lets PetrolEngine's
-		-- AttributeChanged listener bind before we write.
 		_G.__umtBoosted[perf] = { pending = true }
 		task.wait(0.3)
 		if vb.Model:GetAttribute("DriverId") ~= lp.UserId then
@@ -819,14 +728,10 @@ do
 
 		local entry = { Power = pw, PeakRevs = pk, Braking = br, Model = vb.Model, Wheels = {}, Aero = nil }
 
-		-- live attrs the engine reads every frame (Power/Peak/Brake)
 		perf:SetAttribute("Power",    pw * state.POWER_MULT)
 		perf:SetAttribute("PeakRevs", pk * state.PEAK_MULT)
 		perf:SetAttribute("Braking",  br * state.BRAKE_MULT)
 
-		-- REAL grip: wheel friction is baked into CustomPhysicalProperties at
-		-- Suspension.MakeModel. Override each wheel's props directly so grip
-		-- isn't dependent on cargo mass pressing tires into the ground.
 		local wv = vb.Components and vb.Components.WheeledVehicle
 		if wv and wv.Suspensions then
 			for _, susp in ipairs(wv.Suspensions) do
@@ -834,8 +739,7 @@ do
 				if w then
 					local old = w.CustomPhysicalProperties
 					table.insert(entry.Wheels, { Wheel = w, Props = old })
-					-- Roblox clamps Friction to [0, 2]. Pre-clamp to silence warnings
-					-- and still give the maximum traction allowed.
+
 					local newFriction = math.clamp((old and old.Friction or 1.2) * state.GRIP_MULT, 0, 2)
 					w.CustomPhysicalProperties = PhysicalProperties.new(
 						old and old.Density or 1,
@@ -846,15 +750,10 @@ do
 			end
 		end
 
-		-- REAL downforce: GroundAerodynamics snapshots DownforceCoeff at new().
-		-- Set it directly on the component. Also handles Downforce=0 stock by
-		-- adding a baseline instead of multiplying.
 		local aero = vb.Components and vb.Components.GroundAerodynamics
 		if aero then
 			entry.Aero = { Component = aero, OldDownforce = aero.DownforceCoeff }
-			-- if stock downforce is 0 (Quadbike by design), inject a small
-			-- baseline so slider > 1 still has some effect. 0.3 keeps the
-			-- suspension-crush at high speed to a reasonable amount.
+
 			local base = (aero.DownforceCoeff > 0) and aero.DownforceCoeff or 0.3
 			aero.DownforceCoeff = base * state.DOWNFORCE_MULT
 		end
@@ -865,7 +764,7 @@ do
 
 	local function revertAll()
 		for perf, orig in pairs(_G.__umtBoosted) do
-			if orig.pending then continue end  -- not actually applied yet
+			if orig.pending then continue end
 			pcall(function()
 				if perf and perf.Parent then
 					perf:SetAttribute("Power",    orig.Power)
@@ -873,7 +772,7 @@ do
 					perf:SetAttribute("Braking",  orig.Braking)
 				end
 			end)
-			-- restore wheel friction
+
 			for _, w in ipairs(orig.Wheels or {}) do
 				pcall(function()
 					if w.Wheel and w.Wheel.Parent then
@@ -881,7 +780,7 @@ do
 					end
 				end)
 			end
-			-- restore downforce coefficient
+
 			if orig.Aero then
 				pcall(function() orig.Aero.Component.DownforceCoeff = orig.Aero.OldDownforce end)
 			end
@@ -891,18 +790,13 @@ do
 
 	local function hookVehicle(model)
 		mod:Connect(model.AncestryChanged, function()
-			-- vehicle removed: _G.__umtBoosted entries keyed by now-orphaned
-			-- PerformanceFolder become dead weak-refs; revertAll pcalls through
-			-- the parent check so no explicit cleanup needed here.
+
 		end)
 		mod:Connect(model:GetAttributeChangedSignal("DriverId"), function()
 			if not state.enabled then return end
 			if model:GetAttribute("DriverId") ~= lp.UserId then return end
 			if not VC then return end
-			-- RACE FIX: wait for BOTH (a) VC to resolve the vehicle AND
-			-- (b) the vehicle's Components.Engine + WheeledVehicle to exist
-			-- (meaning InitComponents ran). Newly-spawned vehicles need
-			-- longer than first-ever vehicle — poll up to 3s.
+
 			task.spawn(function()
 				local vb
 				for _ = 1, 60 do
@@ -934,7 +828,7 @@ do
 	local boostToggle = sec:Toggle("boost_on", { Label = "auto-boost on sit", Default = true,
 		Callback = function(v)
 			state.enabled = v
-			if not v then revertAll() end  -- flipping off reverts everything
+			if not v then revertAll() end
 		end })
 	local boostPower = sec:Int("boost_power",   { Label = "power mult",     Default = 15, Min = 1, Max = 500, Step = 1,
 		Callback = function(v) state.POWER_MULT = v end })
@@ -946,8 +840,7 @@ do
 		Callback = function(v) state.GRIP_MULT = v end })
 	local boostDown  = sec:Number("boost_down", { Label = "downforce mult (grows with speed² — keep ≤2)", Default = 1, Min = 0, Max = 10, Step = 0.1,
 		Callback = function(v) state.DOWNFORCE_MULT = v end })
-	-- cold-start: pull every saved multiplier into its state slot so boosts
-	-- applied on the next vehicle sit use loaded config, not Defaults.
+
 	bag.hooks.boost_resync = function()
 		state.enabled        = boostToggle:Get()
 		state.POWER_MULT     = boostPower:Get()  or state.POWER_MULT
@@ -968,12 +861,8 @@ do
 	registerTeardown(bag.hooks.boost_unload)
 end
 
--- ============================================================
---  TAB — VEHICLE (flip 180°; helpers for flinger)
---  waypoints removed — was unstable (void-send after truck purchase)
--- ============================================================
 do
-	-- helpers (preserved for flinger via _G.__umtVFHelpers)
+
 	local function myVehicleHere()
 		if not VC then return nil end
 		return VC.CurrentDrivenVehicle
@@ -987,7 +876,6 @@ do
 		return c and c:FindFirstChild("HumanoidRootPart")
 	end
 
-	-- shared anchor-dance teleport
 	local function pivotWithAnchorDance(model, targetCFrame)
 		if not model or not model.PrimaryPart then return false, "no model" end
 		pcall(function()
@@ -1010,7 +898,6 @@ do
 		return true
 	end
 
-	-- flip the current vehicle 180° around its local Y axis (turn around in place)
 	local function flipVehicle180()
 		local vb = myVehicleHere()
 		local model = vb and vb.Model
@@ -1019,16 +906,14 @@ do
 			notify("flip", "no driven vehicle", "error"); return
 		end
 		local cf   = pp.CFrame
-		-- rotate 180° around world-up at the vehicle's position (preserves XZ pos + roll)
+
 		local newCF = CFrame.new(cf.Position) * CFrame.Angles(0, math.pi, 0) * (cf - cf.Position)
-		-- lift slightly to avoid ground clipping on the flip
+
 		newCF = newCF + Vector3.new(0, 2, 0)
 		pivotWithAnchorDance(model, newCF)
 		notify("flip", "rotated 180°", "success")
 	end
 
-	-- bring vehicle to the player's current position (recall)
-	-- undetected: uses anchor-dance which the server treats as owner-authoritative movement
 	local function bringVehicleHere()
 		local vb = myVehicleHere()
 		local model = vb and vb.Model
@@ -1039,21 +924,17 @@ do
 		if not hrp then
 			notify("bring", "no character", "error"); return
 		end
-		-- place behind the player, facing same way, a few studs back + lifted
+
 		local hCF = hrp.CFrame
-		local target = hCF * CFrame.new(0, 3, -6)  -- behind player, +3y lift
+		local target = hCF * CFrame.new(0, 3, -6)
 		pivotWithAnchorDance(model, target)
 		notify("bring", "vehicle recalled", "success")
 	end
 
-	-- Drill Lock Mode: lock pitch (nose up/down) to nearest 90°, keep yaw free so
-	-- player can steer. uses BodyGyro with MaxTorque.Y = 0 — physically no yaw torque,
-	-- so steering untouched. gyro only corrects pitch+roll error toward snapped target.
-	local drillLock = { active = false, conn = nil, gyro = nil, pp = nil }
+	local drillLock = { active = false, conn = nil, pp = nil }
 	local function stopDrillLock()
 		if drillLock.conn then pcall(function() drillLock.conn:Disconnect() end) end
-		if drillLock.gyro then pcall(function() drillLock.gyro:Destroy()    end) end
-		drillLock.conn, drillLock.gyro, drillLock.pp = nil, nil, nil
+		drillLock.conn, drillLock.pp = nil, nil
 		drillLock.active = false
 	end
 	registerTeardown(stopDrillLock)
@@ -1070,18 +951,6 @@ do
 		drillLock.active = true
 		drillLock.pp = pp
 
-		-- BodyGyro: MaxTorque is per WORLD axis. Setting Y to 0 = no yaw torque ever.
-		-- Y stays free, player steering fully untouched. X+Z torque corrects pitch+roll.
-		-- target CFrame updated each frame to snap pitch to nearest 90°, roll to 0.
-		local gyro = Instance.new("BodyGyro")
-		gyro.Name = "UMT_DrillLockGyro"
-		gyro.MaxTorque = Vector3.new(4e5, 0, 4e5)
-		gyro.P = 3e4
-		gyro.D = 1500
-		gyro.CFrame = CFrame.new()  -- initial: level
-		gyro.Parent = pp
-		drillLock.gyro = gyro
-
 		local DEG2RAD = math.pi / 180
 		drillLock.conn = game:GetService("RunService").Heartbeat:Connect(function()
 			if not drillLock.active or _G.__umtSession ~= SESSION then stopDrillLock() return end
@@ -1090,15 +959,21 @@ do
 			if pp2 ~= drillLock.pp or not pp2 or not pp2.Parent then
 				stopDrillLock(); return
 			end
-			local ori = pp2.Orientation  -- degrees (X pitch, Y yaw, Z roll)
-			local snappedPitch = math.round(ori.X / 90) * 90
-			-- gyro target: snapped pitch, LIVE yaw (so no fight with steering), roll 0
-			-- fromOrientation uses Y→X→Z radians order matching .Orientation convention
-			gyro.CFrame = CFrame.fromOrientation(snappedPitch * DEG2RAD, ori.Y * DEG2RAD, 0)
+			local ori = pp2.Orientation
+			local snappedYaw = math.round(ori.Y / 90) * 90
+
+			local pos = pp2.CFrame.Position
+			pp2.CFrame = CFrame.new(pos) * CFrame.fromOrientation(
+				ori.X * DEG2RAD, snappedYaw * DEG2RAD, ori.Z * DEG2RAD)
+
+			local cf = pp2.CFrame
+			local localAV = cf:VectorToObjectSpace(pp2.AssemblyAngularVelocity)
+			localAV = Vector3.new(localAV.X, 0, localAV.Z)
+			pp2.AssemblyAngularVelocity = cf:VectorToWorldSpace(localAV)
 		end)
 	end
 
-	local drillLockToggle  -- forward decl so hotkey can flip toggle UI state too
+	local drillLockToggle
 	local function toggleDrillLock()
 		local newVal = not drillLock.active
 		if drillLockToggle then drillLockToggle:Set(newVal) else
@@ -1108,7 +983,6 @@ do
 		end
 	end
 
-	-- UI
 	local tab = mod:Tab({ Name = "vehicle" })
 	local sec = tab:Section("controls")
 
@@ -1150,7 +1024,6 @@ do
 		OnPress = toggleDrillLock,
 	})
 
-	-- expose flinger helpers via upvalue capture for flinger tab below
 	_G.__umtVFHelpers = {
 		myVehicle    = myVehicleHere,
 		myPrimary    = myPrimary,
@@ -1159,9 +1032,6 @@ do
 	}
 end
 
--- ============================================================
---  TAB — FLINGER (fling other players' vehicles via physics)
--- ============================================================
 do
 	local H = _G.__umtVFHelpers
 	local RunSvc = game:GetService("RunService")
@@ -1316,9 +1186,6 @@ do
 	registerTeardown(bag.hooks.fling_unload)
 end
 
--- ============================================================
---  TAB — FAST PICKAXE
--- ============================================================
 do
 	local tab = mod:Tab({ Name = "fastmine" })
 	local sec = tab:Section("timing")
@@ -1326,8 +1193,7 @@ do
 	local state = { active = false, mult = 0.75, oldMTF = nil }
 	local function enable()
 		if state.active or not MTF or not hookfunction then return end
-		-- stash the TRUE original globally the first time we ever hook, so a
-		-- later reload (without this closure) can still restore it cleanly.
+
 		if not _G.__umt_mtf_hooked then
 			_G.__umt_mtf_hooked = { target = MTF, original = nil }
 		end
@@ -1335,7 +1201,7 @@ do
 			return state.oldMTF(speed, hardness, bh) * state.mult
 		end)
 		state.oldMTF = prev
-		-- only record the FIRST hook's return as "true original"
+
 		if _G.__umt_mtf_hooked.original == nil then
 			_G.__umt_mtf_hooked.original = prev
 		end
@@ -1343,7 +1209,7 @@ do
 	end
 	local function disable()
 		if not state.active then return end
-		-- unconditionally restore to the TRUE original if we have it
+
 		local trueOrig = _G.__umt_mtf_hooked and _G.__umt_mtf_hooked.original
 		pcall(function() hookfunction(MTF, trueOrig or state.oldMTF) end)
 		_G.__umt_mtf_hooked = nil
@@ -1358,20 +1224,15 @@ do
 	local fmMult = sec:Number("fastmine_mult", { Label = "time multiplier (lower = faster)",
 		Default = 0.75, Min = 0.1, Max = 1.0, Step = 0.05,
 		Callback = function(v) state.mult = v; if state.active then disable() enable() end end })
-	-- expose so autoload can re-apply the hook after a silent LoadConfig.
-	-- LoadConfig restores the controls visually but skips Callbacks, so
-	-- state.mult stays at 0.75 (Default) even when the slider shows 0.1 —
-	-- the hook then runs at 0.75 multiplier instead of 0.1 until the user
-	-- drags the slider. Resync pulls the saved mult from the control first,
-	-- THEN re-fires enable() if the toggle wants it on.
+
 	bag.hooks.pick_resync = function()
-		state.mult = fmMult:Get() or state.mult  -- pull saved mult
+		state.mult = fmMult:Get() or state.mult
 		if fmToggle:Get() and not state.active then
 			enable()
 		elseif not fmToggle:Get() and state.active then
 			disable()
 		elseif state.active then
-			-- toggle unchanged, but mult might have — rebuild hook with new mult
+
 			disable(); enable()
 		end
 	end
@@ -1383,22 +1244,14 @@ do
 	registerTeardown(disable)
 end
 
--- ============================================================
---  TAB — SERVER HOP
--- ============================================================
 do
 	local tab = mod:Tab({ Name = "server hop" })
 	local sec = tab:Section("session")
 
-	-- disk-backed visited-server memory with per-entry timestamps + aging.
-	-- entries older than VISIT_TTL expire (default 4h — long enough to avoid
-	-- bouncing back to a just-left server, short enough that the list stays
-	-- small and old IDs eventually recycle). Falls back to in-memory table
-	-- if writefile isn't available.
 	local VISIT_FILE = "BloomUI/umt_visited.json"
-	local VISIT_TTL  = 4 * 3600  -- seconds
+	local VISIT_TTL  = 4 * 3600
 
-	local visited = {}  -- {serverId = unix_timestamp}
+	local visited = {}
 
 	local function loadVisited()
 		if not (readfile and isfile and isfile(VISIT_FILE)) then return end
@@ -1408,7 +1261,7 @@ do
 		if ok2 and type(obj) == "table" then
 			local now = os.time()
 			for id, ts in pairs(obj) do
-				-- drop expired entries at load time
+
 				if type(ts) == "number" and (now - ts) < VISIT_TTL then
 					visited[id] = ts
 				end
@@ -1430,7 +1283,7 @@ do
 		local ts = visited[id]
 		if not ts then return false end
 		if (os.time() - ts) >= VISIT_TTL then
-			visited[id] = nil  -- lazy expire
+			visited[id] = nil
 			return false
 		end
 		return true
@@ -1479,9 +1332,6 @@ do
 		Callback = function() TS:TeleportToPlaceInstance(game.PlaceId, game.JobId, lp) end })
 end
 
--- ============================================================
---  MODULE LIFECYCLE — one point for the whole script
--- ============================================================
 mod:OnDisable(function()
 	bag.hooks.xray_disable()
 	bag.hooks.boost_disable()
@@ -1508,12 +1358,6 @@ _G.__umtToolkit = function()
 	print("[UMT] obliterated via _G")
 end
 
--- ============================================================
---  POST-LOAD HOOKS
--- ============================================================
--- Bloom's AutoConfig handles LoadConfig + autosave + unload-flush for us.
--- All we do here is wire the resyncs that have to run after a silent load
--- (fastmine hookfunction can't be installed via a silent toggle restore).
 mod:OnConfigLoaded(function(ok)
 	if ok then notify("config", "loaded " .. CFG_NAME, "info") end
 	for hname, fn in pairs(bag.hooks) do
@@ -1521,6 +1365,6 @@ mod:OnConfigLoaded(function(ok)
 	end
 end)
 
-_G.__umtClaim = nil  -- release concurrency lock
-print("[UMT] umt toolkit v2.3 loaded — 6 tabs, hotkeys rebindable, drill lock (BodyGyro, yaw-free) on U")
+_G.__umtClaim = nil
+print("[UMT] umt toolkit v2.1 loaded — 6 tabs, hotkeys rebindable, drill lock (DirectCFrame) on U")
 notify("umt toolkit", "loaded — 6 tabs, drill lock = U", "success")
