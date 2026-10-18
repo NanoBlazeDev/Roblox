@@ -53,7 +53,7 @@ local Workspace = game:GetService("Workspace")
 local LocalPlayer = Players.LocalPlayer
 
 local Bloom = {}
-Bloom.Version = "0.2.0"
+Bloom.Version = "0.2.1"
 
 --------------------------------------------------------------------------
 -- Signal
@@ -2101,12 +2101,12 @@ function Tab:Section(name, o)
 	local rule = frame(line, { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.fromScale(0, 0.5), BackgroundTransparency = right and 1 or 0 })
 	paint(rule, { BackgroundColor3 = "Stroke" })
 	local hl = label(line, track(name), { Size = 15, Font = "Display", Color = "TextDim", Auto = X_AUTO, Dim = UDim2.new(0, 0, 1, 0), Z = 2 })
-	hl.BackgroundTransparency = 0
-	paint(hl, { BackgroundColor3 = bgTok })
+	-- transparent header bg so the pattern shows through (was opaque window bg
+	-- used to mask the horizontal rule behind the text — now rule is slimmed/skipped)
+	hl.BackgroundTransparency = 1
 	padding(hl, 0, 10, 0, 6)
 	local cnt = label(line, "00", { Size = 11, Font = "Mono", Color = "TextFaint", Auto = X_AUTO, Dim = UDim2.new(0, 0, 1, 0), Pos = UDim2.fromScale(1, 0), Anchor = Vector2.new(1, 0), Z = 2, AlignX = ALIGN_R })
-	cnt.BackgroundTransparency = 0
-	paint(cnt, { BackgroundColor3 = bgTok })
+	cnt.BackgroundTransparency = 1
 	padding(cnt, 0, 6, 0, 10)
 	sec._count = cnt
 	sec.Frame = f
@@ -4604,7 +4604,13 @@ function Window:_buildBuiltins()
 	look:Number("__pattern_alpha", { Label = "pattern strength", Min = 0, Max = 0.25, Step = 0.01,
 		Default = Bloom.Pattern.Alpha or current.PatternAlpha or 0.08, Callback = function(v)
 			Bloom.Pattern.Alpha = v
-			self:_applyPattern(false)
+			-- apply to ALL open windows/modules, not just the one hosting this slider,
+			-- so the strength change is reflected on every tab everywhere immediately
+			for _, owner in patterns do
+				if type(owner) == "table" and owner._applyPattern then
+					pcall(function() owner:_applyPattern(false) end)
+				end
+			end
 		end })
 	look:Toggle("__border_anim", { Label = "animated border", Default = Bloom.Border.Animated ~= false, Callback = function(v)
 		Bloom.Border.Animated = v
