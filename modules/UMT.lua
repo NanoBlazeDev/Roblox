@@ -1210,16 +1210,13 @@ do
 		if not _G.__umt_mtf_hooked then
 			_G.__umt_mtf_hooked = { target = MTF, original = nil }
 		end
-		state.credit = 0
-		state.lastT  = tick()
+		-- don't reset credit — it accumulates in real time via Heartbeat below,
+		-- so even when just enabled it reflects actual idle time
 		local prev = hookfunction(MTF, function(speed, hardness, bh)
 			local vanilla = state.oldMTF(speed, hardness, bh)
 			if state.mode == "static" then
 				return vanilla * state.mult
 			else
-				local now = tick()
-				state.credit = math.min(SMART_CREDIT_CAP, state.credit + (now - state.lastT))
-				state.lastT  = now
 				local speedMult = (vanilla > 0) and math.max(1, state.credit / vanilla) or 1
 				state.credit = math.max(0, state.credit - vanilla)
 				state.lastMult = speedMult
@@ -1269,12 +1266,12 @@ do
 
 	local RS = game:GetService("RunService")
 	if _G.__umt_fastmine_live then pcall(function() _G.__umt_fastmine_live:Disconnect() end) end
-	_G.__umt_fastmine_live = RS.Heartbeat:Connect(function()
+	_G.__umt_fastmine_live = RS.Heartbeat:Connect(function(dt)
 		if state.active and state.mode == "smart" then
-			local now = tick()
-			local shown = math.min(SMART_CREDIT_CAP, state.credit + (now - state.lastT))
+			-- refill credit continuously in real time (not only on mine events)
+			state.credit = math.min(SMART_CREDIT_CAP, state.credit + dt)
 			pcall(function()
-				liveLbl:SetText(string.format("credit: %.1fs   last mult: %.1fx", shown, state.lastMult))
+				liveLbl:SetText(string.format("credit: %.1fs   last mult: %.1fx", state.credit, state.lastMult))
 			end)
 		end
 	end)
