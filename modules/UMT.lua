@@ -149,7 +149,7 @@ local CFG_NAME = "umt_default"  -- config slot name inside Bloom's shared config
 local okMod, mod = pcall(function()
 	return Bloom:Module({
 		Name        = "umt toolkit",
-		Version     = "2.2",
+		Version     = "2.3",
 		Author      = "ExaVolt",
 		Description = "ultimate mining tycoon tools — ore xray, vehicle boost, flip+bring+drill-lock, flinger, fastmine, server hop",
 		AutoConfig  = CFG_NAME,  -- Bloom owns load/save lifecycle for us
@@ -1046,15 +1046,14 @@ do
 		notify("bring", "vehicle recalled", "success")
 	end
 
-	-- Drill Lock Mode: snap vehicle's X-axis rotation (pitch) to nearest 90°
-	-- uses AlignOrientation constraint (hard-lock) + live yaw/roll tracking so
-	-- player can still steer. physics-level, не воюет с vehicle controller'ом.
-	local drillLock = { active = false, conn = nil, att = nil, align = nil, pp = nil }
+	-- Drill Lock Mode: lock pitch (nose up/down) to nearest 90°, keep yaw free so
+	-- player can steer. uses BodyGyro with MaxTorque.Y = 0 — physically no yaw torque,
+	-- so steering untouched. gyro only corrects pitch+roll error toward snapped target.
+	local drillLock = { active = false, conn = nil, gyro = nil, pp = nil }
 	local function stopDrillLock()
-		if drillLock.conn  then pcall(function() drillLock.conn:Disconnect() end) end
-		if drillLock.align then pcall(function() drillLock.align:Destroy()  end) end
-		if drillLock.att   then pcall(function() drillLock.att:Destroy()    end) end
-		drillLock.conn, drillLock.align, drillLock.att, drillLock.pp = nil, nil, nil, nil
+		if drillLock.conn then pcall(function() drillLock.conn:Disconnect() end) end
+		if drillLock.gyro then pcall(function() drillLock.gyro:Destroy()    end) end
+		drillLock.conn, drillLock.gyro, drillLock.pp = nil, nil, nil
 		drillLock.active = false
 	end
 	registerTeardown(stopDrillLock)
@@ -1071,38 +1070,31 @@ do
 		drillLock.active = true
 		drillLock.pp = pp
 
-		-- attachment on PP (local-space anchor for constraint)
-		local att = Instance.new("Attachment")
-		att.Name = "UMT_DrillLockAtt"
-		att.Parent = pp
-		drillLock.att = att
-
-		-- AlignOrientation with rigidity = hard lock (max torque, max velocity)
-		-- AllAxes locks everything, но мы каждый frame пересчитываем target
-		-- с live yaw/roll + snapped pitch, так что рулить можно
-		local align = Instance.new("AlignOrientation")
-		align.Attachment0 = att
-		align.Mode = Enum.OrientationAlignmentMode.OneAttachment
-		align.AlignType = Enum.AlignType.AllAxes
-		align.RigidityEnabled = true     -- hard constraint, no spring
-		align.ReactionTorqueEnabled = false
-		align.CFrame = pp.CFrame - pp.CFrame.Position  -- initial = current rot
-		align.Parent = pp
-		drillLock.align = align
+		-- BodyGyro: MaxTorque is per WORLD axis. Setting Y to 0 = no yaw torque ever.
+		-- Y stays free, player steering fully untouched. X+Z torque corrects pitch+roll.
+		-- target CFrame updated each frame to snap pitch to nearest 90°, roll to 0.
+		local gyro = Instance.new("BodyGyro")
+		gyro.Name = "UMT_DrillLockGyro"
+		gyro.MaxTorque = Vector3.new(4e5, 0, 4e5)
+		gyro.P = 3e4
+		gyro.D = 1500
+		gyro.CFrame = CFrame.new()  -- initial: level
+		gyro.Parent = pp
+		drillLock.gyro = gyro
 
 		local DEG2RAD = math.pi / 180
 		drillLock.conn = game:GetService("RunService").Heartbeat:Connect(function()
 			if not drillLock.active or _G.__umtSession ~= SESSION then stopDrillLock() return end
-			-- vehicle might have changed (respawn, swap) — re-check
 			local vb2 = myVehicleHere()
 			local pp2 = vb2 and vb2.Model and vb2.Model.PrimaryPart
 			if pp2 ~= drillLock.pp or not pp2 or not pp2.Parent then
 				stopDrillLock(); return
 			end
 			local ori = pp2.Orientation  -- degrees (X pitch, Y yaw, Z roll)
-			local snappedX = math.round(ori.X / 90) * 90
-			-- target: snapped pitch + live yaw/roll (so steering + lean pass through)
-			align.CFrame = CFrame.fromOrientation(snappedX * DEG2RAD, ori.Y * DEG2RAD, ori.Z * DEG2RAD)
+			local snappedPitch = math.round(ori.X / 90) * 90
+			-- gyro target: snapped pitch, LIVE yaw (so no fight with steering), roll 0
+			-- fromOrientation uses Y→X→Z radians order matching .Orientation convention
+			gyro.CFrame = CFrame.fromOrientation(snappedPitch * DEG2RAD, ori.Y * DEG2RAD, 0)
 		end)
 	end
 
@@ -1530,5 +1522,5 @@ mod:OnConfigLoaded(function(ok)
 end)
 
 _G.__umtClaim = nil  -- release concurrency lock
-print("[UMT] umt toolkit v2.2 loaded — 6 tabs, hotkeys rebindable, drill lock (AlignOrientation) on U")
+print("[UMT] umt toolkit v2.3 loaded — 6 tabs, hotkeys rebindable, drill lock (BodyGyro, yaw-free) on U")
 notify("umt toolkit", "loaded — 6 tabs, drill lock = U", "success")
