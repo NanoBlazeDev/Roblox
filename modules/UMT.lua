@@ -1284,21 +1284,25 @@ do
 	local lastDiag = 0
 	_G.__umt_fastmine_live = RS.Heartbeat:Connect(function(dt)
 		if state.active and state.mode == "smart" then
-			local idle = tick() - state.lastMineAt
-			local ready = idle >= state.lastVanilla
+			local lv = tonumber(state.lastVanilla) or 1
+			local lma = tonumber(state.lastMineAt) or 0
+			local lm = tonumber(state.lastMult) or 1
+			local idle = tick() - lma
+			local ready = idle >= lv
 			pcall(function()
 				liveLbl:Set(string.format("idle: %.1fs / %.1fs   %s   last mult: %.1fx",
-					math.min(idle, state.lastVanilla * 2), state.lastVanilla,
-					ready and "READY" or "waiting", state.lastMult))
+					math.min(idle, lv * 2), lv,
+					ready and "READY" or "waiting", lm))
 			end)
 		end
-		-- diagnostic: every 2 sec, print state (new idle-detector fields)
 		if tick() - lastDiag > 2 then
 			lastDiag = tick()
-			local idle = tick() - (state.lastMineAt or 0)
+			local lma = tonumber(state.lastMineAt) or 0
+			local lv  = tonumber(state.lastVanilla) or 0
+			local lm  = tonumber(state.lastMult) or 0
 			print(string.format("[fastmine] active=%s mode=%s idle=%.2fs vanilla=%.2fs lastMult=%.2f",
 				tostring(state.active), tostring(state.mode),
-				idle, state.lastVanilla or 0, state.lastMult))
+				tick() - lma, lv, lm))
 		end
 	end)
 	registerTeardown(function()
