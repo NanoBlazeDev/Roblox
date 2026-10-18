@@ -1194,15 +1194,19 @@ do
 	-- credit += dt each tick, each mine consumes vanilla_time regardless of
 	-- actual time taken. speed_mult = credit / vanilla_time (no user cap).
 	-- credit itself is capped only to prevent one-session infinite accumulation.
-	local SMART_CREDIT_CAP = 60   -- max seconds of credit we'll ever hold
+	-- credit cap is DYNAMIC = one vanilla mine-time (so we only ever store
+	-- enough credit for one burst, never multiple). Keeps the server's
+	-- "sustained % of vanilla" check happy: idle fills to 1 block, burst
+	-- spends it instantly, next blocks vanilla until idle again.
 	local state = {
-		active     = false,
-		mode       = "static",
-		mult       = 0.75,         -- static multiplier
-		credit     = 0,            -- smart: accumulated idle credit
-		lastBh     = nil,          -- smart: last block MTF was called for
-		lastMult   = 1,            -- smart: last applied speed_mult (for UI)
-		oldMTF     = nil,
+		active       = false,
+		mode         = "static",
+		mult         = 0.75,         -- static multiplier
+		credit       = 0,            -- smart: accumulated idle credit (seconds)
+		lastBh       = nil,          -- smart: last block MTF was called for
+		lastVanilla  = 1,            -- smart: vanilla time of last mine (= cap)
+		lastMult     = 1,            -- smart: last applied speed_mult (for UI)
+		oldMTF       = nil,
 	}
 
 	local function enable()
@@ -1217,18 +1221,19 @@ do
 			if state.mode == "static" then
 				return vanilla * state.mult
 			else
-				-- credit = earned time server allows us to skip. Spend up to
-				-- min(credit, vanilla) and the mine returns (vanilla - spent),
-				-- but never faster than 10% of vanilla (prevents anti-cheat trip).
-				-- Also: UMT calls MTF many times per block for display polling,
-				-- so we deduct only when bh (block handle) differs from last.
-				local floor = vanilla * 0.1
-				local maxSpent = vanilla - floor
-				local spent = math.min(state.credit, maxSpent)
-				local actual = vanilla - spent
-				if bh ~= state.lastBh then
-					state.credit = math.max(0, state.credit - spent)
-					state.lastBh = bh
+				-- track vanilla of current block for dynamic cap in Heartbeat
+				state.lastVanilla = vanilla
+				-- only account on new block (bh changes), not display polls
+				local isNewBlock = (bh ~= state.lastBh)
+				if isNewBlock then state.lastBh = bh end
+				-- if we have ~a full block of credit → one instant burst,
+				-- else → vanilla (no sustained speedup = server stays happy)
+				local actual
+				if state.credit >= vanilla * 0.95 then
+					actual = vanilla * 0.1   -- instant
+					if isNewBlock then state.credit = 0 end
+				else
+					actual = vanilla          -- vanilla
 				end
 				state.lastMult = (actual > 0) and (vanilla / actual) or 1
 				return actual
@@ -1280,10 +1285,13 @@ do
 	local lastDiag = 0
 	_G.__umt_fastmine_live = RS.Heartbeat:Connect(function(dt)
 		if state.active and state.mode == "smart" then
-			-- refill credit continuously in real time (not only on mine events)
-			state.credit = math.min(SMART_CREDIT_CAP, state.credit + dt)
+			-- cap at ONE vanilla-mine's worth so credit never stockpiles for
+			-- multi-block burst; one instant mine per idle period, no more.
+			local cap = state.lastVanilla
+			state.credit = math.min(cap, state.credit + dt)
 			pcall(function()
-				liveLbl:Set(string.format("credit: %.1fs   last mult: %.1fx", state.credit, state.lastMult))
+				liveLbl:Set(string.format("credit: %.1fs / %.1fs   last mult: %.1fx",
+					state.credit, cap, state.lastMult))
 			end)
 		end
 		-- diagnostic: every 2 sec, print state so we can see WHY credit is 0
