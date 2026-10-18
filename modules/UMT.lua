@@ -1190,16 +1190,19 @@ do
 	local tab = mod:Tab({ Name = "fastmine" })
 	local sec = tab:Section("static")
 
+	-- smart mode is pure token-bucket mirror of the server's rate limit:
+	-- credit += dt each tick, each mine consumes vanilla_time regardless of
+	-- actual time taken. speed_mult = credit / vanilla_time (no user cap).
+	-- credit itself is capped only to prevent one-session infinite accumulation.
+	local SMART_CREDIT_CAP = 60   -- max seconds of credit we'll ever hold
 	local state = {
-		active = false,
-		mode   = "static",   -- "static" | "smart"
-		mult   = 0.75,       -- static multiplier
-		smartMax    = 10,    -- smart: max speed cap
-		smartCap    = 30,    -- smart: credit cap in seconds
-		credit      = 0,     -- smart: accumulated idle credit
-		lastT       = 0,
-		lastMult    = 1,     -- smart: last applied speed_mult (for UI)
-		oldMTF = nil,
+		active   = false,
+		mode     = "static",
+		mult     = 0.75,          -- static multiplier
+		credit   = 0,             -- smart: accumulated idle credit
+		lastT    = 0,
+		lastMult = 1,             -- smart: last applied speed_mult (for UI)
+		oldMTF   = nil,
 	}
 
 	local function enable()
@@ -1215,10 +1218,9 @@ do
 				return vanilla * state.mult
 			else
 				local now = tick()
-				state.credit = math.min(state.smartCap, state.credit + (now - state.lastT))
+				state.credit = math.min(SMART_CREDIT_CAP, state.credit + (now - state.lastT))
 				state.lastT  = now
-				local maxFromCredit = (vanilla > 0) and (state.credit / vanilla) or state.smartMax
-				local speedMult = math.max(1, math.min(state.smartMax, maxFromCredit))
+				local speedMult = (vanilla > 0) and math.max(1, state.credit / vanilla) or 1
 				state.credit = math.max(0, state.credit - vanilla)
 				state.lastMult = speedMult
 				return vanilla / speedMult
@@ -1252,22 +1254,17 @@ do
 		Callback = function(v) state.mult = v; if state.active and state.mode=="static" then disable() enable() end end })
 	sec:Label("warning: < 0.5 risks server rollback")
 
-	local sec2 = tab:Section("smart (token bucket)")
+	local sec2 = tab:Section("smart (auto)")
 	local smartToggle = sec2:Toggle("fastmine_smart", { Label = "enable smart", Default = false,
 		Callback = function(v)
 			if v then
 				state.mode = "smart"
 				if state.active then disable() end
 				enable()
-				notify("fastmine smart", "cap " .. state.smartMax .. "x", "success")
+				notify("fastmine smart", "auto rate", "success")
 			else disable() end
 		end })
-	local sMax = sec2:Number("fastmine_smart_max", { Label = "max speed cap",
-		Default = 10, Min = 1, Max = 50, Step = 1,
-		Callback = function(v) state.smartMax = v end })
-	local sCap = sec2:Number("fastmine_smart_cap", { Label = "credit cap (seconds)",
-		Default = 30, Min = 1, Max = 300, Step = 1,
-		Callback = function(v) state.smartCap = v end })
+	sec2:Label("auto-takes max speed from accumulated idle credit (no knobs)")
 	local liveLbl = sec2:Label("credit: 0.0s   last mult: 1.0x")
 
 	local RS = game:GetService("RunService")
@@ -1275,7 +1272,7 @@ do
 	_G.__umt_fastmine_live = RS.Heartbeat:Connect(function()
 		if state.active and state.mode == "smart" then
 			local now = tick()
-			local shown = math.min(state.smartCap, state.credit + (now - state.lastT))
+			local shown = math.min(SMART_CREDIT_CAP, state.credit + (now - state.lastT))
 			pcall(function()
 				liveLbl:SetText(string.format("credit: %.1fs   last mult: %.1fx", shown, state.lastMult))
 			end)
@@ -1287,9 +1284,7 @@ do
 	end)
 
 	bag.hooks.pick_resync = function()
-		state.mult     = fmMult:Get() or state.mult
-		state.smartMax = sMax:Get() or state.smartMax
-		state.smartCap = sCap:Get() or state.smartCap
+		state.mult = fmMult:Get() or state.mult
 		if smartToggle:Get() then
 			state.mode = "smart"
 		elseif fmToggle:Get() then
