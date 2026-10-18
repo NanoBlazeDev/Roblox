@@ -1219,16 +1219,18 @@ do
 			if state.mode == "static" then
 				return vanilla * state.mult
 			else
-				local speedMult = (vanilla > 0) and math.max(1, state.credit / vanilla) or 1
-				-- throttle: only deduct credit once per SMART_DEDUCT_MIN sec,
-				-- so poll calls don't drain the bucket
+				-- credit = earned time server allows us to skip. Spend up to
+				-- min(credit, vanilla) and the mine returns (vanilla - spent).
+				-- vanilla=100, credit=60 → mine in 40s; vanilla=1, credit=60 → 0s.
+				local spent = math.min(state.credit, vanilla)
+				local actual = vanilla - spent
 				local now = tick()
 				if now - state.lastDeduct >= SMART_DEDUCT_MIN then
-					state.credit = math.max(0, state.credit - vanilla)
+					state.credit = math.max(0, state.credit - spent)
 					state.lastDeduct = now
 				end
-				state.lastMult = speedMult
-				return vanilla / speedMult
+				state.lastMult = (actual > 0) and (vanilla / actual) or 999
+				return actual
 			end
 		end)
 		state.oldMTF = prev
