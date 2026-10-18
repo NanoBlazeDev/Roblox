@@ -2479,18 +2479,19 @@ function Section:Toggle(id, o)
 		local endPos = UDim2.fromOffset(v and 26 or 2, 3)
 		seq += 1
 		local my = seq
+		-- non-animated path (config load / silent set) must FORCE visual to
+		-- final state even if a prior tween is in flight — otherwise the knob
+		-- stays mid-animation and desyncs from the new value
+		sw.BackgroundTransparency = bgT
+		knob.Size = UDim2.fromOffset(20, 18)
+		knob.Position = endPos
 		if animate then
 			tween(sw, Motion.Hover, { BackgroundTransparency = bgT })
-
 			tween(knob, TweenInfo.new(0.11, ES.Quad, ED.Out), { Size = UDim2.fromOffset(28, 18), Position = UDim2.fromOffset(v and 10 or 10, 3) })
 			task.delay(0.1, function()
 				if seq ~= my then return end
 				tween(knob, Motion.Knob, { Size = UDim2.fromOffset(20, 18), Position = endPos })
 			end)
-		else
-			sw.BackgroundTransparency = bgT
-			knob.Size = UDim2.fromOffset(20, 18)
-			knob.Position = endPos
 		end
 	end
 	sw.MouseButton1Click:Connect(function()
@@ -3988,6 +3989,7 @@ function Module:_startAutoConfig()
 	task.defer(function()
 		local ok = pcall(function() win:LoadConfig(slot) end)
 
+		self._configLoaded = ok -- remember for late listeners
 		for _, fn in self._on.ConfigLoaded do pcall(fn, ok) end
 		local okE, cur = pcall(function() return HS:JSONEncode(win:GetConfig()) end)
 		if okE then lastDump = cur end
@@ -4041,6 +4043,10 @@ function Module:_startAutoConfig()
 end
 
 function Module:OnConfigLoaded(fn)
+	-- fire immediately if load already completed (listener registered late)
+	if self._configLoaded ~= nil then
+		pcall(fn, self._configLoaded)
+	end
 	table.insert(self._on.ConfigLoaded, fn); return self
 end
 
