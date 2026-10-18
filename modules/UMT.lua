@@ -1194,17 +1194,16 @@ do
 	-- credit += dt each tick, each mine consumes vanilla_time regardless of
 	-- actual time taken. speed_mult = credit / vanilla_time (no user cap).
 	-- credit itself is capped only to prevent one-session infinite accumulation.
-	-- credit cap is DYNAMIC = one vanilla mine-time (so we only ever store
-	-- enough credit for one burst, never multiple). Keeps the server's
-	-- "sustained % of vanilla" check happy: idle fills to 1 block, burst
-	-- spends it instantly, next blocks vanilla until idle again.
+	-- smart = idle-detector. If time since last mine ≥ vanilla, you've
+	-- "earned" one burst. First block in a vein = instant. Next blocks =
+	-- vanilla (+ small human factor). No stockpiling, no multi-block bursts.
 	local state = {
 		active       = false,
 		mode         = "static",
 		mult         = 0.75,         -- static multiplier
-		credit       = 0,            -- smart: accumulated idle credit (seconds)
 		lastBh       = nil,          -- smart: last block MTF was called for
-		lastVanilla  = 1,            -- smart: vanilla time of last mine (= cap)
+		lastMineAt   = 0,            -- smart: tick() when last block mined
+		lastVanilla  = 1,            -- smart: for UI
 		lastMult     = 1,            -- smart: last applied speed_mult (for UI)
 		oldMTF       = nil,
 	}
@@ -1221,20 +1220,20 @@ do
 			if state.mode == "static" then
 				return vanilla * state.mult
 			else
-				-- track vanilla of current block for dynamic cap in Heartbeat
 				state.lastVanilla = vanilla
-				-- only account on new block (bh changes), not display polls
 				local isNewBlock = (bh ~= state.lastBh)
 				if isNewBlock then state.lastBh = bh end
-				-- if we have ~a full block of credit → one instant burst,
-				-- else → vanilla (no sustained speedup = server stays happy)
+				local now = tick()
+				local idle = now - state.lastMineAt
+				-- idle at least 1 vanilla worth → one instant block; else vanilla.
+				-- human factor: 0.95× vanilla on sustained mining (slight boost)
 				local actual
-				if state.credit >= vanilla * 0.95 then
-					actual = vanilla * 0.1   -- instant
-					if isNewBlock then state.credit = 0 end
+				if idle >= vanilla then
+					actual = vanilla * 0.1       -- instant burst
 				else
-					actual = vanilla          -- vanilla
+					actual = vanilla * 0.95       -- human factor
 				end
+				if isNewBlock then state.lastMineAt = now end
 				state.lastMult = (actual > 0) and (vanilla / actual) or 1
 				return actual
 			end
@@ -1285,13 +1284,12 @@ do
 	local lastDiag = 0
 	_G.__umt_fastmine_live = RS.Heartbeat:Connect(function(dt)
 		if state.active and state.mode == "smart" then
-			-- cap at ONE vanilla-mine's worth so credit never stockpiles for
-			-- multi-block burst; one instant mine per idle period, no more.
-			local cap = state.lastVanilla
-			state.credit = math.min(cap, state.credit + dt)
+			local idle = tick() - state.lastMineAt
+			local ready = idle >= state.lastVanilla
 			pcall(function()
-				liveLbl:Set(string.format("credit: %.1fs / %.1fs   last mult: %.1fx",
-					state.credit, cap, state.lastMult))
+				liveLbl:Set(string.format("idle: %.1fs / %.1fs   %s   last mult: %.1fx",
+					math.min(idle, state.lastVanilla * 2), state.lastVanilla,
+					ready and "READY" or "waiting", state.lastMult))
 			end)
 		end
 		-- diagnostic: every 2 sec, print state so we can see WHY credit is 0
