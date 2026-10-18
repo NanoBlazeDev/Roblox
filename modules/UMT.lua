@@ -1188,20 +1188,43 @@ end
 
 do
 	local tab = mod:Tab({ Name = "fastmine" })
-	local sec = tab:Section("timing")
+	local sec = tab:Section("static")
 
-	local state = { active = false, mult = 0.75, oldMTF = nil }
+	local state = {
+		active = false,
+		mode   = "static",   -- "static" | "smart"
+		mult   = 0.75,       -- static multiplier
+		smartMax    = 10,    -- smart: max speed cap
+		smartCap    = 30,    -- smart: credit cap in seconds
+		credit      = 0,     -- smart: accumulated idle credit
+		lastT       = 0,
+		lastMult    = 1,     -- smart: last applied speed_mult (for UI)
+		oldMTF = nil,
+	}
+
 	local function enable()
 		if state.active or not MTF or not hookfunction then return end
-
 		if not _G.__umt_mtf_hooked then
 			_G.__umt_mtf_hooked = { target = MTF, original = nil }
 		end
+		state.credit = 0
+		state.lastT  = tick()
 		local prev = hookfunction(MTF, function(speed, hardness, bh)
-			return state.oldMTF(speed, hardness, bh) * state.mult
+			local vanilla = state.oldMTF(speed, hardness, bh)
+			if state.mode == "static" then
+				return vanilla * state.mult
+			else
+				local now = tick()
+				state.credit = math.min(state.smartCap, state.credit + (now - state.lastT))
+				state.lastT  = now
+				local maxFromCredit = (vanilla > 0) and (state.credit / vanilla) or state.smartMax
+				local speedMult = math.max(1, math.min(state.smartMax, maxFromCredit))
+				state.credit = math.max(0, state.credit - vanilla)
+				state.lastMult = speedMult
+				return vanilla / speedMult
+			end
 		end)
 		state.oldMTF = prev
-
 		if _G.__umt_mtf_hooked.original == nil then
 			_G.__umt_mtf_hooked.original = prev
 		end
@@ -1209,34 +1232,77 @@ do
 	end
 	local function disable()
 		if not state.active then return end
-
 		local trueOrig = _G.__umt_mtf_hooked and _G.__umt_mtf_hooked.original
 		pcall(function() hookfunction(MTF, trueOrig or state.oldMTF) end)
 		_G.__umt_mtf_hooked = nil
 		state.active = false
 	end
 
-	local fmToggle = sec:Toggle("fastmine_on", { Label = "enable", Default = false,
+	local fmToggle = sec:Toggle("fastmine_on", { Label = "enable static", Default = false,
 		Callback = function(v)
-			if v then enable(); notify("fastmine on", "x" .. state.mult, "success")
+			if v then
+				state.mode = "static"
+				if state.active then disable() end
+				enable()
+				notify("fastmine on", "static x" .. state.mult, "success")
 			else disable() end
 		end })
 	local fmMult = sec:Number("fastmine_mult", { Label = "time multiplier (lower = faster)",
 		Default = 0.75, Min = 0.1, Max = 1.0, Step = 0.05,
-		Callback = function(v) state.mult = v; if state.active then disable() enable() end end })
+		Callback = function(v) state.mult = v; if state.active and state.mode=="static" then disable() enable() end end })
+	sec:Label("warning: < 0.5 risks server rollback")
+
+	local sec2 = tab:Section("smart (token bucket)")
+	local smartToggle = sec2:Toggle("fastmine_smart", { Label = "enable smart", Default = false,
+		Callback = function(v)
+			if v then
+				state.mode = "smart"
+				if state.active then disable() end
+				enable()
+				notify("fastmine smart", "cap " .. state.smartMax .. "x", "success")
+			else disable() end
+		end })
+	local sMax = sec2:Number("fastmine_smart_max", { Label = "max speed cap",
+		Default = 10, Min = 1, Max = 50, Step = 1,
+		Callback = function(v) state.smartMax = v end })
+	local sCap = sec2:Number("fastmine_smart_cap", { Label = "credit cap (seconds)",
+		Default = 30, Min = 1, Max = 300, Step = 1,
+		Callback = function(v) state.smartCap = v end })
+	local liveLbl = sec2:Label("credit: 0.0s   last mult: 1.0x")
+
+	local RS = game:GetService("RunService")
+	if _G.__umt_fastmine_live then pcall(function() _G.__umt_fastmine_live:Disconnect() end) end
+	_G.__umt_fastmine_live = RS.Heartbeat:Connect(function()
+		if state.active and state.mode == "smart" then
+			local now = tick()
+			local shown = math.min(state.smartCap, state.credit + (now - state.lastT))
+			pcall(function()
+				liveLbl:SetText(string.format("credit: %.1fs   last mult: %.1fx", shown, state.lastMult))
+			end)
+		end
+	end)
+	registerTeardown(function()
+		if _G.__umt_fastmine_live then pcall(function() _G.__umt_fastmine_live:Disconnect() end) end
+		_G.__umt_fastmine_live = nil
+	end)
 
 	bag.hooks.pick_resync = function()
-		state.mult = fmMult:Get() or state.mult
-		if fmToggle:Get() and not state.active then
+		state.mult     = fmMult:Get() or state.mult
+		state.smartMax = sMax:Get() or state.smartMax
+		state.smartCap = sCap:Get() or state.smartCap
+		if smartToggle:Get() then
+			state.mode = "smart"
+		elseif fmToggle:Get() then
+			state.mode = "static"
+		end
+		if (fmToggle:Get() or smartToggle:Get()) and not state.active then
 			enable()
-		elseif not fmToggle:Get() and state.active then
+		elseif not fmToggle:Get() and not smartToggle:Get() and state.active then
 			disable()
 		elseif state.active then
-
 			disable(); enable()
 		end
 	end
-	sec:Label("warning: < 0.5 risks server rollback")
 
 	bag.hooks.pick_disable = disable
 	bag.hooks.pick_enable  = function() end
