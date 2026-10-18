@@ -1,45 +1,16 @@
---[[
-	bloom ui lib · v0.1.0
-	Admin UI library for Roblox (client-side). Single ModuleScript.
-
-	local Bloom = require(game.ReplicatedStorage.Bloom)
-	local win = Bloom:CreateWindow({ Title = "admin", ToggleKey = Enum.KeyCode.RightShift })
-	local tab = win:Tab({ Name = "Players", Icon = "users", Group = "Control" })
-	local sec = tab:Section("Identity")
-	sec:String("name", { Label = "Name", Default = "", Callback = function(v) end })
-
-	Controls (Section methods): String, Number, Int, Toggle, Check, Vector3, Vector2, UDim2,
-	Color, Enum (Enum type or list of strings), CFrame, Table, Instance, Range, Keybind,
-	Button, Label. Each returns a control: :Get() :Set(v, silent) .Changed :SetVisible(b)
-
-	Window: :Tab :Notify :Dialog :Show :Hide :Toggle :SelectTab :Destroy
-	        :SaveConfig :LoadConfig :ListConfigs :DeleteConfig  (backed by Bloom.ConfigEndpoint)
-	Global:  Bloom:SetTheme(themeOrName, { Tween = 0.35 }), Bloom.Themes, Bloom.Icons
-]]
-
--- singleton: if a Bloom instance is already running on this executor,
--- reuse it instead of creating a second window+table. lets multiple
--- scripts loadstring Bloom independently and share one window.
---
--- race-safe: a plain `if _G.__BloomInstance then return` leaves a window
--- where two concurrent loadstrings both see nil and both build a window.
--- Fix: claim a lightweight lock IMMEDIATELY (before any yielding call),
--- so a second concurrent load sees the claim and waits for the first to
--- finish, then returns the finished instance.
 do
-	-- small random stagger so simultaneous injections desync
+
 	task.wait(math.random() * 0.15)
 
 	if _G.__BloomInstance then return _G.__BloomInstance end
 	if _G.__BloomClaim then
-		-- another load is mid-build; wait up to 10s for it to finish, then
-		-- return its instance.
+
 		local t0 = tick()
 		while _G.__BloomClaim and (tick() - t0) < 10 do task.wait(0.05) end
 		if _G.__BloomInstance then return _G.__BloomInstance end
-		-- fell through (claim stuck or died) — proceed to build ours
+
 	end
-	_G.__BloomClaim = true  -- claimed BEFORE any yield below
+	_G.__BloomClaim = true
 end
 
 local Players = game:GetService("Players")
@@ -55,9 +26,6 @@ local LocalPlayer = Players.LocalPlayer
 local Bloom = {}
 Bloom.Version = "0.2.2"
 
---------------------------------------------------------------------------
--- Signal
---------------------------------------------------------------------------
 local Signal = {}
 Signal.__index = Signal
 
@@ -86,9 +54,6 @@ end
 Bloom.Signal = Signal
 Bloom.ThemeChanged = Signal.new()
 
---------------------------------------------------------------------------
--- Motion (TweenInfo spec)
---------------------------------------------------------------------------
 local ES, ED = Enum.EasingStyle, Enum.EasingDirection
 local Motion = {
 	Hover = TweenInfo.new(0.14, ES.Sine, ED.Out),
@@ -112,9 +77,6 @@ local function tween(inst, info, goal)
 	return t
 end
 
---------------------------------------------------------------------------
--- Themes
---------------------------------------------------------------------------
 local ThemeMT = {}
 ThemeMT.__index = ThemeMT
 
@@ -147,7 +109,6 @@ local FONT_BODY_BOLD = Font.fromName("Nunito", Enum.FontWeight.Bold)
 local FONT_MONO = Font.fromName("Inconsolata", Enum.FontWeight.Medium)
 local FONT_MONO_BOLD = Font.fromName("Inconsolata", Enum.FontWeight.Bold)
 
--- Peony: the default. Every theme keeps TextFaint >= ~4.5:1 against Window.
 local Peony = makeTheme({
 	Name = "Peony",
 	Bg = "0D0A0D", Window = "151116", Surface = "1C171D", Raised = "251E26",
@@ -166,7 +127,7 @@ local Peony = makeTheme({
 
 Bloom.Themes = {
 	Peony = Peony,
-	-- Sakura: soft light grey with a deeper blossom pink (no paper-white glare)
+
 	Sakura = Peony:Extend({
 		Name = "Sakura",
 		Bg = "AEA8AC", Window = "CFCACD", Surface = "C5BFC2", Raised = "BBB5B8",
@@ -218,24 +179,22 @@ Bloom.Themes = {
 }
 
 local current = Peony
-local painted = setmetatable({}, { __mode = "k" }) -- Instance -> { prop = token }
-local corners = setmetatable({}, { __mode = "k" }) -- UICorner -> base radius
-local patterns = setmetatable({}, { __mode = "k" }) -- background pattern ImageLabels
+local painted = setmetatable({}, { __mode = "k" })
+local corners = setmetatable({}, { __mode = "k" })
+local patterns = setmetatable({}, { __mode = "k" })
 
--- Background pattern: a seamless tile (white lines on transparent), tinted by the theme.
 Bloom.Pattern = {
-	Image = "rbxassetid://128708357911120", -- built-in wave tile (512x512, seamless)
-	TileSize = 256, -- on-screen size of one tile (source is 512x512)
-	Speed = 12, -- drift in px/s, 0 = static
-	Parallax = 3, -- max px the pattern shifts against the cursor
-	Alpha = nil, -- overrides theme.PatternAlpha (0..1)
+	Image = "rbxassetid://128708357911120",
+	TileSize = 256,
+	Speed = 12,
+	Parallax = 3,
+	Alpha = nil,
 }
 
--- Window border: UIStroke with a rotating two-colour gradient (theme.Glow1 -> theme.Glow2).
 Bloom.Border = {
-	Enabled = true, -- false = plain 1px stroke
+	Enabled = true,
 	Animated = true,
-	Speed = 40, -- degrees per second
+	Speed = 40,
 	Thickness = 1.5,
 }
 
@@ -313,11 +272,8 @@ function Bloom:SetTheme(t, opts)
 	Bloom.ThemeChanged:Fire(t)
 end
 
---------------------------------------------------------------------------
--- Icons (sprite atlas)
---------------------------------------------------------------------------
 local Icons = {
-	Atlas = "", -- rbxassetid://<id> of rivet_icons.png (1024x576, 16 cols, 64px cells)
+	Atlas = "",
 	Cell = 64,
 	Columns = 16,
 	Map = {
@@ -359,7 +315,6 @@ function Icons.Apply(img, name)
 	end
 end
 
--- Swap in your own atlas: Icons.Register("rbxassetid://123", { name = index, ... }, 64, 16)
 function Icons.Register(assetId, map, cell, columns)
 	Icons.Atlas = assetId or Icons.Atlas
 	if map then Icons.Map = map end
@@ -375,16 +330,11 @@ function Icons.Register(assetId, map, cell, columns)
 	end
 end
 
--- Auto-load icon atlas from BloomUI/icons.png.
--- Downloads from Bloom.AtlasUrl on first run and caches to disk.
--- If URL ends in .txt or .b64, treats the body as base64 and decodes to PNG
--- (lets you host via GitHub Gist which refuses binary paste).
 Bloom.AtlasUrl = Bloom.AtlasUrl
 	or "https://raw.githubusercontent.com/NanoBlazeDev/Roblox/refs/heads/main/UI/icons.png?raw=true"
 do
 	local ATLAS_PATH = "BloomUI/icons.png"
 
-	-- minimal base64 decoder (pure Luau)
 	local B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 	local b64idx = {}
 	for i = 1, #B64 do b64idx[B64:sub(i,i)] = i - 1 end
@@ -425,8 +375,7 @@ do
 		task.spawn(function()
 			local ok, data = pcall(game.HttpGet, game, Bloom.AtlasUrl)
 			if not (ok and data and #data > 0) then return end
-			-- auto-detect: real PNG starts with \x89PNG magic bytes.
-			-- anything else assumed base64 (gist text host workaround).
+
 			if data:sub(1, 4) ~= "\137PNG" then
 				data = b64decode(data)
 			end
@@ -438,8 +387,6 @@ do
 	end
 end
 
--- Bloom:SetPattern("rbxassetid://123", { TileSize = 256, Speed = 12, Parallax = 3, Alpha = 0.07 })
--- Pass "" to turn the pattern off. Applies live to every open window.
 function Bloom:SetPattern(image, opts)
 	local P = Bloom.Pattern
 	if image ~= nil then P.Image = image end
@@ -454,9 +401,6 @@ function Bloom:SetPattern(image, opts)
 	end
 end
 
---------------------------------------------------------------------------
--- Primitives
---------------------------------------------------------------------------
 local function new(class, props, children)
 	local inst = Instance.new(class)
 	local parent
@@ -517,7 +461,6 @@ local function list(parent, dir, gap, alignV, alignH)
 	})
 end
 
--- bloom style: chrome text is lowercase (values keep their case).
 local function lc(s)
 	return string.lower(tostring(s or ""))
 end
@@ -595,7 +538,7 @@ local function icon(parent, name, size, token, o)
 		Parent = parent,
 	})
 	paint(img, { ImageColor3 = token })
-	-- fallback glyph when no atlas is registered: a small outlined diamond
+
 	local fb = frame(img, {
 		Name = "Fallback", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
 		Size = UDim2.fromScale(0.36, 0.36), Rotation = 0, Visible = false,
@@ -613,7 +556,6 @@ function Bloom.Icon(name, opts)
 	return img
 end
 
--- Five-petal blossom built from pill-shaped frames (the bloom mark).
 function Bloom.Flower(parent, size, o)
 	o = o or {}
 	local holder = frame(parent, { Name = "Flower", Size = UDim2.fromOffset(size, size), AnchorPoint = o.Anchor or Vector2.zero, Position = o.Pos or UDim2.new(), LayoutOrder = o.Order or 0 })
@@ -640,7 +582,7 @@ function Bloom.Flower(parent, size, o)
 	paint(core, { BackgroundColor3 = "Window" })
 	new("UICorner", { CornerRadius = UDim.new(1, 0), Parent = core })
 	local api = { Holder = holder, Spin = spin, Petals = petals, Core = core }
-	-- petals grow out one by one while the flower unwinds
+
 	function api.Bloom(delay)
 		spin.Rotation = -72
 		for i, p in petals do
@@ -665,7 +607,6 @@ local function shake(obj)
 	end)
 end
 
--- Field = slot frame containing a focus ring (behind) and the box (front).
 local function field(parent, o)
 	o = o or {}
 	local outer = frame(parent, {
@@ -721,7 +662,6 @@ local function textbox(parent, o)
 	return tb
 end
 
--- Wire a TextBox to a field's focus state.
 local function bindFocus(f, tb)
 	tb.Focused:Connect(function() f.focus = true; f.refresh() end)
 	tb.FocusLost:Connect(function() f.focus = false; f.refresh() end)
@@ -729,7 +669,7 @@ end
 
 local function button(parent, txt, o)
 	o = o or {}
-	local kind = o.Kind or "ghost" -- ghost | primary | danger
+	local kind = o.Kind or "ghost"
 	local b = new("TextButton", {
 		Name = o.Name or "Button",
 		AutoButtonColor = false,
@@ -791,7 +731,7 @@ local function iconButton(parent, name, o)
 	local z = (o.Z or 3) + 1
 	local ic, glyph
 	if name == "x" or name == "minus" then
-		-- drawn glyphs: window chrome must not depend on the icon atlas
+
 		local gs = math.round((o.IconSize or 16) * 0.75)
 		glyph = {}
 		local holder = frame(b, { Size = UDim2.fromOffset(gs, gs), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = z })
@@ -826,7 +766,6 @@ local function fmt(n, dec)
 	return string.format("%." .. dec .. "f", n)
 end
 
--- compact number: integers without decimals, otherwise up to `dec`, trailing zeros trimmed
 local function short(n, dec)
 	if n == math.floor(n) then return tostring(math.floor(n)) end
 	local s = string.format("%." .. (dec or 2) .. "f", n)
@@ -839,9 +778,6 @@ local function snap(v, step, min)
 	return math.round((v - (min or 0)) / step) * step + (min or 0)
 end
 
---------------------------------------------------------------------------
--- Strings (override for localisation)
---------------------------------------------------------------------------
 Bloom.Strings = {
 	Search = "find a setting…",
 	Status = "server live",
@@ -855,9 +791,6 @@ Bloom.Strings = {
 	KeyTaken = "already used by ",
 }
 
---------------------------------------------------------------------------
--- Window / Tab / Section / Control
---------------------------------------------------------------------------
 local Window = {}
 Window.__index = Window
 local Tab = {}
@@ -890,7 +823,7 @@ local function isMove(input)
 	return input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
 end
 
-local shared -- the single window every script shares
+local shared
 
 local function chevronGlyph(parent, token, o)
 	o = o or {}
@@ -916,8 +849,6 @@ local function uiShadow(parent, o)
 end
 Bloom.Shadow = uiShadow
 
--- Bloom:Init(opts) creates the shared window (or updates it). Every later call,
--- Bloom:GetWindow() and Bloom:Module() reuse the same window.
 function Bloom:Init(opts)
 	if shared and not shared._destroyed then
 		shared:_apply(opts or {})
@@ -967,7 +898,7 @@ function Window._new(opts)
 	self.Shown = Signal.new()
 	self.Hidden = Signal.new()
 	self.ModulesChanged = Signal.new()
-	self.AnyControlChanged = Signal.new()  -- fires on every Control:_emit
+	self.AnyControlChanged = Signal.new()
 	local size = self.Size
 	local S = Bloom.Strings
 
@@ -981,9 +912,9 @@ function Window._new(opts)
 		IgnoreGuiInset = true,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 		DisplayOrder = opts.DisplayOrder or 999,
-		Parent = opts.Parent,  -- set below with executor-safe resolution
+		Parent = opts.Parent,
 	})
-	-- exploit-safe parent resolution: hidden gui > CoreGui > PlayerGui fallback
+
 	if not gui.Parent then
 		local target
 		if gethui then
@@ -1026,11 +957,6 @@ function Window._new(opts)
 		conn(self, Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"), refit)
 	end
 
-	---------------------------------------------------------------- window surface
-	-- One animated "stage" holds three layers: the backdrop group (fill, pattern,
-	-- shadows), the content group, and the border frame. Pattern drift and the
-	-- spinning border live outside the content CanvasGroup, so it only re-renders
-	-- when its own content changes.
 	local stage = frame(holder, { Name = "Stage", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1), ZIndex = 1 })
 	self._stage = stage
 	self._wscale = new("UIScale", { Scale = 0.96, Parent = stage })
@@ -1124,7 +1050,6 @@ function Window._new(opts)
 		table.insert(self._marks, rec)
 	end
 
-	---------------------------------------------------------------- title bar
 	local bar = frame(win, { Name = "TitleBar", Size = UDim2.new(1, 0, 0, 50), Active = true })
 	local barLine = frame(bar, { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.fromScale(0, 1), AnchorPoint = Vector2.new(0, 1), BackgroundTransparency = 0 })
 	paint(barLine, { BackgroundColor3 = "Stroke" })
@@ -1133,7 +1058,7 @@ function Window._new(opts)
 	list(brand, HORIZ, 10, V_CENTER)
 	self._flower = Bloom.Flower(brand, 22, { Order = 1 })
 	self._logo = self._flower.Holder
-	-- fixed brand: "bloom" + "ui lib // by exavolt"; page names come from modules
+
 	self._brandLabel = label(brand, "bloom", { Size = 18, Font = "Display", Auto = X_AUTO, Dim = UDim2.new(0, 0, 0, 22), Order = 2 })
 	self._brandSub = label(brand, "ui lib // by exavolt", { Size = 13, Font = "Mono", Color = "TextFaint", Auto = X_AUTO, Dim = UDim2.new(0, 0, 0, 20), Order = 3 })
 
@@ -1157,7 +1082,6 @@ function Window._new(opts)
 
 	local closeB = iconButton(rightBox, "x", { Order = 3, HoverColor = "Bad" })
 
-	---------------------------------------------------------------- body
 	local body = frame(win, { Name = "Body", Size = UDim2.new(1, 0, 1, -50), Position = UDim2.fromOffset(0, 50) })
 	local side = frame(body, { Name = "Sidebar", Size = UDim2.new(0, 176, 1, 0) })
 	local sideLine = frame(body, { Size = UDim2.new(0, 1, 1, 0), Position = UDim2.fromOffset(176, 0), BackgroundTransparency = 0 })
@@ -1229,7 +1153,6 @@ function Window._new(opts)
 	list(toasts, nil, 0, Enum.VerticalAlignment.Bottom, Enum.HorizontalAlignment.Right)
 	self._toasts = toasts
 
-	---------------------------------------------------------------- the bloom button (bud)
 	local bud = new("TextButton", {
 		Name = "Bud", Text = "", AutoButtonColor = false, BorderSizePixel = 0,
 		Size = UDim2.fromOffset(52, 52), AnchorPoint = Vector2.new(0.5, 0.5), ZIndex = 100, Parent = gui,
@@ -1285,7 +1208,6 @@ function Window._new(opts)
 		end
 	end)
 
-	---------------------------------------------------------------- drag (smoothed) + per-frame motion
 	local dragging, dragStart, startOff = false, nil, nil
 	local target = Vector2.zero
 	self._offset = Vector2.zero
@@ -1326,7 +1248,7 @@ function Window._new(opts)
 			if math.abs(math.round(nxt.X) - (self._laidW or -1)) >= 1 then self:_relayout() end
 		end
 		self.Size = self._targetSize
-		-- bud follows its target with a softer spring
+
 		local bp = self._budPos
 		if (bp - self._budTarget).Magnitude > 0.05 then
 			bp = bp:Lerp(self._budTarget, 1 - math.exp(-dt * 18))
@@ -1363,7 +1285,6 @@ function Window._new(opts)
 		end
 	end)
 
-	---------------------------------------------------------------- resize
 	local grip = new("TextButton", { Name = "Resize", Text = "", AutoButtonColor = false, BackgroundTransparency = 1, Size = UDim2.fromOffset(20, 20), Position = UDim2.fromScale(1, 1), AnchorPoint = Vector2.new(1, 1), ZIndex = 45, Parent = win })
 	local gripLines = {}
 	for i, spec in { { 10, 11.5 }, { 5, 14.5 } } do
@@ -1426,7 +1347,6 @@ function Window._new(opts)
 		end
 	end)
 
-	---------------------------------------------------------------- keys & search
 	conn(self, UserInputService.InputBegan, function(input, gp)
 		if self._listening then return end
 		if UserInputService:GetFocusedTextBox() then return end
@@ -1452,7 +1372,6 @@ function Window._new(opts)
 	end)
 	closeB.MouseButton1Click:Connect(function() self:RequestClose() end)
 
-	---------------------------------------------------------------- built-in pages
 	self._bloomGroup = self:_group("bloom", { Builtin = true })
 	self:_buildBuiltins()
 
@@ -1487,7 +1406,7 @@ function Window:Show()
 		self._dim.Visible = true
 		tween(self._dim, Motion.Dim, { BackgroundTransparency = 1 - (current.Dim or 0.3) })
 	end
-	-- grow out of the bloom button
+
 	local info = TweenInfo.new(0.55, ES.Quint, ED.Out)
 	local from = self:_budOffset()
 	local stage = self._stage
@@ -1534,7 +1453,7 @@ function Window:Hide()
 	self.Visible = false
 	self:_closePopup()
 	if self._search:IsFocused() then self._search:ReleaseFocus() end
-	-- fold back into the bloom button
+
 	local info = TweenInfo.new(0.34, ES.Quint, ED.In)
 	local to = self:_budOffset()
 	tween(self._dim, Motion.Close, { BackgroundTransparency = 1 })
@@ -1553,7 +1472,7 @@ function Window:Hide()
 	self._hideToken = token
 	task.delay(0.34, function()
 		if self._destroyed then return end
-		-- the bud "catches" the window
+
 		tween(self._budScale, TweenInfo.new(0.12, ES.Quad, ED.Out), { Scale = 1.16 })
 		task.delay(0.12, function() tween(self._budScale, Motion.Knob, { Scale = 1 }) end)
 		self._budFlower.Bloom(0)
@@ -1614,7 +1533,6 @@ function Window:_queueLayout()
 	end)
 end
 
----------------------------------------------------------------- sidebar groups
 local SIDE_FULL, SIDE_RAIL = 176, 58
 local GROUP_HEAD = 30
 
@@ -1800,7 +1718,6 @@ function Window:_filter(q)
 	end
 end
 
--- Popup layer (dropdowns, pickers).
 function Window:_openPopup(anchor, w, h, build, o)
 	o = o or {}
 	self:_closePopup()
@@ -1846,7 +1763,6 @@ function Window:_closePopup()
 	task.delay(0.15, function() pop:Destroy() end)
 end
 
----------------------------------------------------------------- tabs / pages
 function Window:Tab(o)
 	if typeof(o) == "string" then o = { Name = o } end
 	o = o or {}
@@ -1923,7 +1839,6 @@ function Window:Tab(o)
 	return tab
 end
 
--- A page is a tab whose content you draw yourself: Build(tab, Bloom.UI).
 function Window:Page(o)
 	local tab = self:Tab(o)
 	if o and o.Build then
@@ -1973,7 +1888,6 @@ function Tab:_nextOrder()
 	return self._ord
 end
 
--- Free-form block inside a tab (used by pages). Returns a vertical-list frame.
 function Tab:Canvas(o)
 	o = o or {}
 	local rightSide = o.Side == "Right"
@@ -2007,7 +1921,7 @@ function Window:SelectTab(tab, instant)
 	if prev and not prev._removed then prev.Page.Visible = false end
 	tab.Page.Visible = true
 	self._title.Text = lc(tab.Name)
-	-- crumb = module (group) / page
+
 	self._crumb.Text = track(tab.Group.Name .. " / " .. tab.Name)
 	if self._search.Text ~= "" then self._search.Text = "" end
 	if tab._onShow then task.spawn(tab._onShow) end
@@ -2030,7 +1944,6 @@ function Window:_patAlpha()
 	return 1 - (cfg.Alpha or Bloom.Pattern.Alpha or current.PatternAlpha or 0.07)
 end
 
--- Shows the pattern of the current page's module (Module:SetPattern) or the default one.
 function Window:_applyPattern(animate)
 	local pat = self._pattern
 	if not pat then return end
@@ -2101,8 +2014,7 @@ function Tab:Section(name, o)
 	local rule = frame(line, { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.fromScale(0, 0.5), BackgroundTransparency = right and 1 or 0 })
 	paint(rule, { BackgroundColor3 = "Stroke" })
 	local hl = label(line, track(name), { Size = 15, Font = "Display", Color = "TextDim", Auto = X_AUTO, Dim = UDim2.new(0, 0, 1, 0), Z = 2 })
-	-- transparent header bg so the pattern shows through (was opaque window bg
-	-- used to mask the horizontal rule behind the text — now rule is slimmed/skipped)
+
 	hl.BackgroundTransparency = 1
 	padding(hl, 0, 10, 0, 6)
 	local cnt = label(line, "00", { Size = 11, Font = "Mono", Color = "TextFaint", Auto = X_AUTO, Dim = UDim2.new(0, 0, 1, 0), Pos = UDim2.fromScale(1, 0), Anchor = Vector2.new(1, 0), Z = 2, AlignX = ALIGN_R })
@@ -2195,8 +2107,7 @@ end
 function Control:_emit()
 	self.Changed:Fire(self.Value)
 	if self.Callback then task.spawn(self.Callback, self.Value) end
-	-- window-wide signal so AutoConfig can save on ANY change immediately
-	-- instead of polling every 3s (keeps configs tight to the user's actions).
+
 	local win = self.Window
 	if win and win.AnyControlChanged then
 		win.AnyControlChanged:Fire(self)
@@ -2231,9 +2142,6 @@ function Section:_control(kind, id, o, typeToken, chipText, height)
 	return c, r.Control, o
 end
 
---------------------------------------------------------------------------
--- Controls · part 1
---------------------------------------------------------------------------
 local function shiftDown()
 	return UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
 end
@@ -2250,7 +2158,6 @@ local function numbersIn(s)
 	return out
 end
 
--- STRING ---------------------------------------------------------------
 function Section:String(id, o)
 	local c, ctl
 	c, ctl, o = self:_control("String", id, o, "TStr", "STR")
@@ -2306,7 +2213,6 @@ function Section:String(id, o)
 	return c
 end
 
--- SLIDER PIECES ---------------------------------------------------------
 local function sliderTrack(parent, rightPad)
 	local area = new("TextButton", {
 		Name = "Track", Text = "", AutoButtonColor = false, BackgroundTransparency = 1,
@@ -2367,7 +2273,6 @@ local function sliderThumb(area)
 	return api
 end
 
--- NUMBER ----------------------------------------------------------------
 function Section:Number(id, o)
 	local c, ctl
 	c, ctl, o = self:_control("Number", id, o, "TNum", "NUM")
@@ -2445,7 +2350,6 @@ function Section:Number(id, o)
 	return c
 end
 
--- INT (stepper) ---------------------------------------------------------
 function Section:Int(id, o)
 	local c, ctl
 	c, ctl, o = self:_control("Int", id, o, "TInt", "INT")
@@ -2550,7 +2454,6 @@ function Section:Int(id, o)
 	return c
 end
 
--- TOGGLE (liquid switch) -------------------------------------------------
 function Section:Toggle(id, o)
 	local c, ctl
 	c, ctl, o = self:_control("Toggle", id, o, "TBool", "BOOL")
@@ -2578,7 +2481,7 @@ function Section:Toggle(id, o)
 		local my = seq
 		if animate then
 			tween(sw, Motion.Hover, { BackgroundTransparency = bgT })
-			-- stretch toward the target, then snap back with overshoot
+
 			tween(knob, TweenInfo.new(0.11, ES.Quad, ED.Out), { Size = UDim2.fromOffset(28, 18), Position = UDim2.fromOffset(v and 10 or 10, 3) })
 			task.delay(0.1, function()
 				if seq ~= my then return end
@@ -2600,7 +2503,6 @@ function Section:Toggle(id, o)
 	return c
 end
 
--- CHECK -----------------------------------------------------------------
 function Section:Check(id, o)
 	local c, ctl
 	c, ctl, o = self:_control("Check", id, o, "TBool", "BOOL")
@@ -2636,7 +2538,6 @@ function Section:Check(id, o)
 	return c
 end
 
--- VECTOR-LIKE (Vector3, Vector2, UDim2, CFrame rows) --------------------
 local function axisField(parent, letterText, token, pos, size, win, o, onCommit, onScrub)
 	local f = field(parent, { Size = size, Pos = pos, Anchor = Vector2.new(0, 0.5) })
 	local lw = #letterText > 1 and 24 or 16
@@ -2648,7 +2549,7 @@ local function axisField(parent, letterText, token, pos, size, win, o, onCommit,
 	local tb = textbox(f.Box, { AlignX = ALIGN_R, Dim = UDim2.new(1, -(lw + 14), 1, 0), Pos = UDim2.fromOffset(lw + 6, 0) })
 	bindFocus(f, tb)
 	tb.FocusLost:Connect(function() onCommit(tb.Text, f) end)
-	-- drag the axis letter to scrub
+
 	local scrubbing, sx = false, 0
 	letter.InputBegan:Connect(function(input)
 		if isPointer(input) then
@@ -2679,7 +2580,6 @@ local function axisField(parent, letterText, token, pos, size, win, o, onCommit,
 	return tb, f
 end
 
--- spec: { names, tokens, decs, ctor(...comps) -> value, parts(value) -> {comps} }
 local function vectorGroup(c, parent, spec, o, yOffset, fieldsOut)
 	local win = c.Window
 	local n = #spec.names
@@ -2793,7 +2693,7 @@ function Section:CFrame(id, o)
 		local rx, ry, rz = v:ToOrientation()
 		return { v.X, v.Y, v.Z, math.deg(rx), math.deg(ry), math.deg(rz) }
 	end, CFrame.identity, 78)
-	-- quick grabs under the label
+
 	local grabs = frame(c.Row.Inner, { Size = UDim2.fromOffset(84, 22), Position = UDim2.fromOffset(6, 46) })
 	list(grabs, HORIZ, 4, V_CENTER)
 	local function grab(text, fn, order)
@@ -2816,7 +2716,6 @@ function Section:CFrame(id, o)
 	return c
 end
 
--- RANGE (dual thumb) ----------------------------------------------------
 function Section:Range(id, o)
 	local c, ctl
 	c, ctl, o = self:_control("Range", id, o, "TNum", "RANGE")
@@ -2896,7 +2795,6 @@ function Section:Range(id, o)
 	return c
 end
 
--- LABEL / PARAGRAPH -------------------------------------------------------
 function Section:Label(text, o)
 	o = o or {}
 	o.Full = true
@@ -2915,9 +2813,6 @@ function Section:Label(text, o)
 	return api
 end
 
---------------------------------------------------------------------------
--- Controls · part 2
---------------------------------------------------------------------------
 local function chevron(parent, token, o)
 	o = o or {}
 	local ch = frame(parent, { Name = "Chevron", Size = UDim2.fromOffset(14, 14), Position = o.Pos or UDim2.new(), AnchorPoint = o.Anchor or Vector2.zero, ZIndex = o.Z or 3, Rotation = o.Rotation or 0 })
@@ -2937,7 +2832,6 @@ local function checkGlyph(parent, token, z)
 	return m
 end
 
--- COLOR3 ---------------------------------------------------------------
 local PRESETS = { "D4FF4A", "FF6B5A", "FFB547", "6EE7A8", "7CC4FF", "C9A0FF", "FF86B6", "ECEAE4" }
 
 function Section:Color(id, o)
@@ -2955,7 +2849,7 @@ function Section:Color(id, o)
 	bindFocus(f, tb)
 	local rgb = label(ctl, "", { Size = 12, Font = "Mono", Color = "TextFaint", Pos = UDim2.fromOffset(148, 0), Dim = UDim2.new(1, -148, 1, 0), Truncate = true })
 	local H, Sat, Val = 0, 0, 1
-	local sync -- set while picker is open
+	local sync
 	c._apply = function(self2, col, keepHSV)
 		if typeof(col) ~= "Color3" then col = Color3.new(1, 1, 1) end
 		self2.Value = col
@@ -2995,7 +2889,7 @@ function Section:Color(id, o)
 		local cons = {}
 		local original = c.Value
 		win:_openPopup(sw, 240, 250, function(p)
-			-- saturation / value square
+
 			local sv = new("TextButton", { Name = "SV", Text = "", AutoButtonColor = false, BorderSizePixel = 0, Size = UDim2.fromOffset(182, 150), Position = UDim2.fromOffset(12, 12), ZIndex = 53, Parent = p })
 			corner(sv, 4)
 			local white = frame(sv, { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0, BackgroundColor3 = Color3.new(1, 1, 1), ZIndex = 54 })
@@ -3007,7 +2901,7 @@ function Section:Color(id, o)
 			local cur = frame(sv, { Size = UDim2.fromOffset(12, 12), AnchorPoint = Vector2.new(0.5, 0.5), ZIndex = 57 })
 			corner(cur, 6)
 			new("UIStroke", { Thickness = 2, Color = Color3.new(1, 1, 1), Parent = cur })
-			-- hue bar
+
 			local hue = new("TextButton", { Name = "Hue", Text = "", AutoButtonColor = false, BorderSizePixel = 0, Size = UDim2.fromOffset(14, 150), Position = UDim2.fromOffset(212, 12), BackgroundColor3 = Color3.new(1, 1, 1), ZIndex = 53, Parent = p })
 			corner(hue, 3)
 			local kp = {}
@@ -3016,7 +2910,7 @@ function Section:Color(id, o)
 			local hh = frame(hue, { Size = UDim2.new(1, 6, 0, 4), AnchorPoint = Vector2.new(0.5, 0.5), BackgroundTransparency = 0, BackgroundColor3 = Color3.new(1, 1, 1), ZIndex = 56 })
 			corner(hh, 2)
 			new("UIStroke", { Thickness = 1, Color = Color3.new(0, 0, 0), Transparency = 0.6, Parent = hh })
-			-- presets
+
 			local row = frame(p, { Size = UDim2.fromOffset(216, 22), Position = UDim2.fromOffset(12, 174), ZIndex = 53 })
 			list(row, HORIZ, 6, V_CENTER)
 			for i, hex in (o.Presets or PRESETS) do
@@ -3028,7 +2922,7 @@ function Section:Color(id, o)
 				b.MouseLeave:Connect(function() recolor(bs, "Color", "StrokeStrong", Motion.HoverOut) end)
 				b.MouseButton1Click:Connect(function() commit(col) end)
 			end
-			-- before / after + hex
+
 			local cmp = frame(p, { Size = UDim2.fromOffset(44, 30), Position = UDim2.fromOffset(12, 208), ZIndex = 53, ClipsDescendants = true })
 			corner(cmp, 4)
 			local old = new("TextButton", { Text = "", AutoButtonColor = false, BorderSizePixel = 0, Size = UDim2.new(0.5, 0, 1, 0), BackgroundColor3 = original, ZIndex = 54, Parent = cmp })
@@ -3090,7 +2984,6 @@ function Section:Color(id, o)
 	return c
 end
 
--- ENUM / DROPDOWN --------------------------------------------------------
 function Section:Enum(id, o)
 	if type(id) == "table" then o = id; id = o.Id end
 	o = o or {}
@@ -3262,7 +3155,6 @@ function Section:Dropdown(id, o)
 	return self:Enum(id, o)
 end
 
--- TABLE (tree viewer) ----------------------------------------------------
 local function describe(v)
 	local t = typeof(v)
 	if t == "string" then return "TStr", "STR", '"' .. v .. '"' end
@@ -3409,7 +3301,6 @@ function Section:Table(id, o)
 	return c
 end
 
--- INSTANCE picker -------------------------------------------------------
 function Section:Instance(id, o)
 	local c, ctl
 	c, ctl, o = self:_control("Instance", id, o, "TInst", "INST")
@@ -3485,7 +3376,6 @@ function Section:Instance(id, o)
 	return c
 end
 
--- KEYBIND -----------------------------------------------------------------
 function Section:Keybind(id, o)
 	local c, ctl
 	c, ctl, o = self:_control("Keybind", id, o, "TEnum", "KEY")
@@ -3577,7 +3467,6 @@ function Section:Keybind(id, o)
 	return c
 end
 
--- BUTTON ------------------------------------------------------------------
 function Section:Button(id, o)
 	if type(o) == "function" then o = { Callback = o } end
 	if type(id) == "table" then o = id; id = o.Id end
@@ -3632,7 +3521,6 @@ function Section:Button(id, o)
 	return c
 end
 
--- Row of equal-width buttons: sec:Buttons({ {Text=, Callback=, Kind="primary"|"danger", Hint=} ... })
 function Section:Buttons(defs, o)
 	o = o or {}
 	o.Full = true
@@ -3655,9 +3543,6 @@ function Section:Buttons(defs, o)
 	return out
 end
 
---------------------------------------------------------------------------
--- Notifications
---------------------------------------------------------------------------
 local toastSeq = 0
 local KIND_TOKEN = { success = "Accent", info = "Info", warn = "Warn", error = "Bad" }
 local KIND_ICON = { success = "circle-check", info = "info", warn = "triangle-alert", error = "circle-x" }
@@ -3671,10 +3556,8 @@ function Window:Notify(o)
 	local W = 320
 	toastSeq += 1
 
-	-- dynamic height: measure wrapped title + body text and let the card
-	-- expand to fit. No truncation unless the user explicitly set Truncate.
 	local TextService = game:GetService("TextService")
-	local innerW = W - 100  -- width available for text (card minus icon + close)
+	local innerW = W - 100
 	local function measure(text, size, font)
 		if not text or text == "" then return 0 end
 		local ok, v = pcall(function()
@@ -3682,26 +3565,20 @@ function Window:Notify(o)
 		end)
 		return ok and v.Y or size + 4
 	end
-	-- body renders in RobotoMono which is noticeably wider than Gotham, so
-	-- measure with the matching font or we underestimate wrap height and
-	-- the 2nd line gets clipped (e.g. ending at a colon).
+
 	local titleH = math.max(20, measure(o.Title or "", 14, Enum.Font.Gotham))
 	local bodyH  = o.Text and measure(o.Text, 12, Enum.Font.RobotoMono) or 0
-	-- +1 line of slack so an off-by-one measurement never clips text
+
 	if o.Text then bodyH = bodyH + 14 end
 	local H
 	if o.Text then
-		H = math.max(62, 20 + titleH + bodyH)  -- 11 top + title + 4 gap + body + 5 bottom
+		H = math.max(62, 20 + titleH + bodyH)
 	else
 		H = math.max(50, titleH + 20)
 	end
 
 	self._toastList = self._toastList or {}
-	-- no cap — if the user has lots of modules firing notifs, show them all
 
-	-- give slot its full size IMMEDIATELY so UIListLayout spaces it correctly
-	-- on frame 1. Previously we tweened Size 0 → H+10, which parked rapidly-
-	-- fired toasts at the same y position until the tween finished.
 	local slot = frame(self._toasts, { Name = "Toast", Size = UDim2.fromOffset(W, H + 10), LayoutOrder = toastSeq })
 	local card = new("CanvasGroup", { Size = UDim2.fromOffset(W, H), Position = UDim2.fromOffset(28, 0), GroupTransparency = 1, BorderSizePixel = 0, Parent = slot })
 	paint(card, { BackgroundColor3 = "Window" })
@@ -3727,7 +3604,6 @@ function Window:Notify(o)
 	local barF = frame(trackF, { Size = UDim2.fromScale(dur > 0 and 1 or 0, 1), BackgroundTransparency = 0 })
 	paint(barF, { BackgroundColor3 = tok })
 
-	-- entrance anim lives entirely on the card now (slot is final-size already)
 	tween(card, Motion.Toast, { Position = UDim2.new(), GroupTransparency = 0 })
 	tween(tsh, Motion.Toast, { Transparency = 0.5 })
 
@@ -3768,10 +3644,6 @@ function Window:Notify(o)
 	return handle
 end
 
---------------------------------------------------------------------------
--- Dialog (modal inside the window)
---------------------------------------------------------------------------
--- win:Dialog({ Title=, Text=, Tag="Confirm", Buttons = { {Text="Cancel"}, {Text="Delete", Kind="danger"} }, Callback = function(index, text) end })
 function Window:Dialog(o)
 	o = o or {}
 	self:_closePopup()
@@ -3842,7 +3714,6 @@ function Window:Dialog(o)
 	return { Close = function() close(nil, nil) end }
 end
 
--- Yielding variant: local index, text = win:Confirm({...})
 function Window:Confirm(o)
 	local thread = coroutine.running()
 	o = table.clone(o or {})
@@ -3851,9 +3722,6 @@ function Window:Confirm(o)
 	return coroutine.yield()
 end
 
---------------------------------------------------------------------------
--- Configs
---------------------------------------------------------------------------
 local Codec = {}
 Bloom.Codec = Codec
 
@@ -3898,12 +3766,8 @@ function Codec.decode(v)
 	return out
 end
 
--- STUB endpoint: in-memory only. Replace with your transport (RemoteFunction -> DataStore, etc.).
--- Every function may yield. payload is a JSON string.
 local memoryStore = {}
--- Default endpoint: executor filesystem under BloomUI/configs when writefile exists,
--- otherwise falls back to in-session memory. User scripts can override by setting
--- Bloom.ConfigEndpoint = {...} to point at HTTP, DataStore, etc.
+
 local BLOOM_FOLDER  = "BloomUI"
 local BLOOM_CFG_DIR = BLOOM_FOLDER .. "/configs"
 if makefolder and isfolder then
@@ -3940,7 +3804,7 @@ Bloom.ConfigEndpoint = {
 				end
 			end
 		end
-		-- also include in-memory names (if executor filesystem not available)
+
 		for n in memoryStore do table.insert(names, n) end
 		table.sort(names)
 		return names
@@ -3989,9 +3853,7 @@ function Window:LoadConfig(name)
 	if type(payload) ~= "string" then return false, "not found" end
 	local ok2, obj = pcall(HttpService.JSONDecode, HttpService, payload)
 	if not ok2 or type(obj) ~= "table" then return false, "corrupt payload" end
-	-- apply silently so control callbacks (which usually fire notifications)
-	-- don't spam the user with "slider changed", "toggle changed" on every
-	-- stored value when loading a saved config.
+
 	self:ApplyConfig(obj.data, true)
 	return true
 end
@@ -4006,7 +3868,6 @@ function Window:DeleteConfig(name)
 	return ok, (not ok) and err or nil
 end
 
--- Ready-made sections ------------------------------------------------------
 function Tab:ConfigManager(title)
 	local win = self.Window
 	local sec = self:Section(title or "Configs")
@@ -4062,9 +3923,7 @@ function Tab:ThemeManager(title)
 	for n in Bloom.Themes do names[#names + 1] = n end
 	table.sort(names)
 	local accent
-	-- Save = true on both now (was false). _startWindowAutoSave includes any
-	-- __-prefixed control in the bloom_window slot and re-fires the Callback
-	-- on load, so the theme/accent restore properly across sessions.
+
 	sec:Enum("__theme", {
 		Label = "Preset", Options = names, Default = current.Name,
 		Callback = function(n)
@@ -4083,14 +3942,10 @@ function Tab:ThemeManager(title)
 	return sec
 end
 
---------------------------------------------------------------------------
--- Modules: several scripts share one window
---------------------------------------------------------------------------
 local Module = {}
 Module.__index = Module
 Bloom.ModuleClass = Module
 
--- local mod = Bloom:Module({ Name = "world tools", Version = "1.0", Author = "you", Description = "..." })
 function Bloom:Module(o)
 	if type(o) == "string" then o = { Name = o } end
 	return Bloom:GetWindow():_registerModule(o or {})
@@ -4100,7 +3955,7 @@ function Window:_registerModule(o)
 	local name = o.Name or ("module " .. (#self.Modules + 1))
 	for _, old in self.Modules do
 		if old.Name == name then
-			old:Unload(true) -- the same script ran again: replace it
+			old:Unload(true)
 			break
 		end
 	end
@@ -4114,9 +3969,6 @@ function Window:_registerModule(o)
 	self:_refreshModulesPage()
 	if o.Announce then self:Notify({ Title = "module loaded", Text = name, Kind = "info" }) end
 
-	-- AutoConfig: Bloom owns the LoadConfig + autosave lifecycle so scripts
-	-- don't reinvent it (and don't race each other's config file). Opt in
-	-- via o.AutoConfig = "slot_name" or AutoConfig = true (uses module name).
 	if o.AutoConfig then
 		local slot = (type(o.AutoConfig) == "string") and o.AutoConfig
 			or name:lower():gsub("%s+", "_")
@@ -4126,10 +3978,6 @@ function Window:_registerModule(o)
 	return m
 end
 
--- Autosave + load lifecycle owned by Bloom. Guards:
---  * never save until LoadConfig has run (so defaults can't clobber saves)
---  * baseline seeded from POST-load state (not "")
---  * loop stops when the module unloads
 function Module:_startAutoConfig()
 	local HS = game:GetService("HttpService")
 	local slot = self._autoConfigSlot
@@ -4139,15 +3987,13 @@ function Module:_startAutoConfig()
 
 	task.defer(function()
 		local ok = pcall(function() win:LoadConfig(slot) end)
-		-- fire OnConfigLoaded hooks so modules can resync side-effect toggles
-		-- (fastmine hookfunction, etc.) that LoadConfig's silent apply skipped
+
 		for _, fn in self._on.ConfigLoaded do pcall(fn, ok) end
 		local okE, cur = pcall(function() return HS:JSONEncode(win:GetConfig()) end)
 		if okE then lastDump = cur end
 		loadDone = true
 	end)
 
-	-- helper: do the diff-check + save (shared by event-driven and polling paths)
 	local saving = false
 	local function trySave()
 		if saving or not loadDone or lastDump == nil then return end
@@ -4160,11 +4006,6 @@ function Module:_startAutoConfig()
 		end
 	end
 
-	-- EVENT-DRIVEN: fire a debounced save on EVERY control change.
-	-- debouncing collapses rapid changes (slider drag, keybind rebind) into one
-	-- write; the ~400ms window is short enough that configs are never stale
-	-- but long enough that scroll-wheeling a Number control doesn't thrash
-	-- the file. Each new change bumps the deadline forward.
 	local pending = 0
 	local function schedule()
 		if not self._autoConfigAlive or self._unloaded then return end
@@ -4172,14 +4013,12 @@ function Module:_startAutoConfig()
 		task.spawn(function()
 			local myDeadline = pending
 			while tick() < pending do task.wait(0.1) end
-			-- only this spawn's deadline wins; others were superseded
+
 			if pending == myDeadline then trySave() end
 		end)
 	end
 	local sigConn = win.AnyControlChanged:Connect(schedule)
 
-	-- POLLING FALLBACK: still run a slow diff-check every 5s in case something
-	-- bypassed _emit (direct state mutation, external script set a flag, etc.)
 	task.spawn(function()
 		while self._autoConfigAlive and not self._unloaded do
 			task.wait(5)
@@ -4192,7 +4031,6 @@ function Module:_startAutoConfig()
 		end
 	end)
 
-	-- flush on unload, but only if load actually completed
 	self:OnUnload(function()
 		self._autoConfigAlive = false
 		pcall(function() sigConn:Disconnect() end)
@@ -4227,7 +4065,6 @@ function Module:Page(o)
 	return t
 end
 
--- connections made through the module are disconnected on unload
 function Module:Connect(signal, fn)
 	local c = signal:Connect(fn)
 	table.insert(self._conns, c)
@@ -4238,8 +4075,6 @@ function Module:OnEnable(fn) table.insert(self._on.Enable, fn) return self end
 function Module:OnDisable(fn) table.insert(self._on.Disable, fn) return self end
 function Module:OnUnload(fn) table.insert(self._on.Unload, fn) return self end
 
--- Pages of this module get their own background. Pass nil to fall back to the default.
--- mod:SetPattern("rbxassetid://123", { TileSize = 256, Speed = 12, Parallax = 3, Alpha = 0.08, Tint = "Accent" })
 function Module:SetPattern(image, opts)
 	if image == nil or image == false then
 		self.Pattern = nil
@@ -4304,9 +4139,6 @@ function Window:_refreshModulesPage()
 	end
 end
 
---------------------------------------------------------------------------
--- Bloom.UI: building blocks for custom pages (Page{ Build = function(tab, ui) })
---------------------------------------------------------------------------
 local UI = {}
 Bloom.UI = UI
 UI.New, UI.Frame, UI.Label, UI.Paint, UI.Recolor, UI.Tween = new, frame, label, paint, recolor, tween
@@ -4319,7 +4151,6 @@ local function uiScale()
 	return math.max(0.01, w._fit.Scale * w._wscale.Scale)
 end
 
--- section-style caption: "text ———— right"
 function UI.Caption(parent, text, right, o)
 	o = o or {}
 	local line = frame(parent, { Name = "Caption", Size = UDim2.new(1, 0, 0, 22), LayoutOrder = o.Order or 0 })
@@ -4362,7 +4193,6 @@ function UI.Row(parent, o)
 	return r
 end
 
--- responsive grid: as many columns of at least minW as fit
 function UI.Grid(parent, minW, cellH, gap, o)
 	o = o or {}
 	gap = gap or 10
@@ -4378,7 +4208,6 @@ function UI.Grid(parent, minW, cellH, gap, o)
 	return g
 end
 
--- metric tile; returns frame and set(value, token?)
 function UI.Stat(parent, name, value, o)
 	o = o or {}
 	local f = frame(parent, { Name = "Stat", BackgroundTransparency = 0, LayoutOrder = o.Order or 0 })
@@ -4402,7 +4231,6 @@ function UI.Button(parent, text, o)
 	return b
 end
 
--- compact on/off switch; onChange(bool)
 function UI.Switch(parent, value, onChange, o)
 	o = o or {}
 	local sw = new("TextButton", { Name = "Switch", Text = "", AutoButtonColor = false, BorderSizePixel = 0, Size = UDim2.fromOffset(42, 22), LayoutOrder = o.Order or 0, Parent = parent })
@@ -4455,9 +4283,6 @@ local function ago(sec)
 end
 UI.Ago = ago
 
---------------------------------------------------------------------------
--- Built-in pages: bloom / main, bloom / modules
---------------------------------------------------------------------------
 local MONO_TAG = '<font family="rbxasset://fonts/families/Inconsolata.json">%s</font>'
 
 function Window:_buildBuiltins()
@@ -4595,8 +4420,7 @@ function Window:_buildBuiltins()
 	self._settingsTab = st
 	st:ThemeManager("theme")
 	local look = st:Section("look")
-	-- Save = true on these now (was false, meaning they'd reset every session).
-	-- Window-level persistence is handled by _startWindowAutoSave below.
+
 	look:Toggle("__pattern", { Label = "pattern", Default = true, Callback = function(v)
 		self._patternOff = not v
 		self:_applyPattern(true)
@@ -4604,11 +4428,7 @@ function Window:_buildBuiltins()
 	look:Number("__pattern_alpha", { Label = "pattern strength", Min = 0, Max = 0.25, Step = 0.01,
 		Default = Bloom.Pattern.Alpha or current.PatternAlpha or 0.08, Callback = function(v)
 			Bloom.Pattern.Alpha = v
-			-- apply to ALL open windows/modules, not just the one hosting this slider.
-			-- animate=true creates a new tween that supersedes any in-flight tween
-			-- from a concurrent SelectTab (which otherwise finishes at the OLD alpha
-			-- and overwrites a direct ImageTransparency set — the race that broke
-			-- initial-load propagation to non-settings tabs).
+
 			for _, owner in patterns do
 				if type(owner) == "table" and owner._applyPattern then
 					pcall(function() owner:_applyPattern(true) end)
@@ -4631,14 +4451,9 @@ function Window:_buildBuiltins()
 		if k then self.ToggleKey = k end
 	end })
 
-	-- window-level autosave (separate from per-module AutoConfig). loads/saves
-	-- just the __-prefixed Bloom chrome settings to a dedicated slot so UI
-	-- tweaks persist across sessions regardless of which modules are loaded.
 	self:_startWindowAutoSave("bloom_window")
 end
 
--- subset save/load: only persist controls whose id starts with "__" (chrome
--- settings), kept separate from module configs so UI prefs don't collide.
 function Window:_startWindowAutoSave(slot)
 	local HS = game:GetService("HttpService")
 	local loadDone, lastDump = false, nil
@@ -4656,14 +4471,9 @@ function Window:_startWindowAutoSave(slot)
 	end
 
 	task.defer(function()
-		-- try to load existing bloom_window config
+
 		pcall(function() self:LoadConfig(slot) end)
-		-- LoadConfig applies values silently (ctl:Set(v, true)), which updates
-		-- the visual state but skips the Callback. For Bloom chrome controls
-		-- the Callback is what actually APPLIES the side effect (toggles
-		-- self._patternOff, mutates Bloom.Pattern.Alpha, re-tweens the dim
-		-- overlay, etc.). Without this re-fire the UI shows the saved state
-		-- but the engine runs at defaults.
+
 		for id, ctl in pairs(self.Flags) do
 			if type(id) == "string" and id:sub(1, 2) == "__" and ctl.Callback then
 				local ok, v = pcall(function() return ctl:Get() end)
@@ -4674,7 +4484,6 @@ function Window:_startWindowAutoSave(slot)
 		loadDone = true
 	end)
 
-	-- hook AnyControlChanged, but only save if a __-prefix control changed
 	local sigConn = self.AnyControlChanged:Connect(function(ctl)
 		if not loadDone or not ctl or not ctl.Id then return end
 		if type(ctl.Id) ~= "string" or ctl.Id:sub(1, 2) ~= "__" then return end
@@ -4688,15 +4497,12 @@ function Window:_startWindowAutoSave(slot)
 	self._windowAutosaveConn = sigConn
 end
 
---------------------------------------------------------------------------
--- Teardown
---------------------------------------------------------------------------
 function Window:Destroy()
 	if self._destroyed then return end
 	for i = #self.Modules, 1, -1 do self.Modules[i]:Unload(true) end
 	self._destroyed = true
 	if shared == self then shared = nil end
-	-- clear the singleton cache so a re-inject fetches fresh Bloom source
+
 	if _G.__BloomInstance == Bloom then _G.__BloomInstance = nil end
 	self:_closePopup()
 	local info = TweenInfo.new(0.3, ES.Quint, ED.In)
@@ -4719,5 +4525,5 @@ function Window:Destroy()
 end
 
 _G.__BloomInstance = Bloom
-_G.__BloomClaim = nil  -- release the build lock; others may now proceed
+_G.__BloomClaim = nil
 return Bloom
