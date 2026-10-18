@@ -1292,11 +1292,13 @@ do
 					ready and "READY" or "waiting", state.lastMult))
 			end)
 		end
-		-- diagnostic: every 2 sec, print state so we can see WHY credit is 0
+		-- diagnostic: every 2 sec, print state (new idle-detector fields)
 		if tick() - lastDiag > 2 then
 			lastDiag = tick()
-			print(string.format("[fastmine] active=%s mode=%s credit=%.2f lastMult=%.2f",
-				tostring(state.active), tostring(state.mode), state.credit, state.lastMult))
+			local idle = tick() - (state.lastMineAt or 0)
+			print(string.format("[fastmine] active=%s mode=%s idle=%.2fs vanilla=%.2fs lastMult=%.2f",
+				tostring(state.active), tostring(state.mode),
+				idle, state.lastVanilla or 0, state.lastMult))
 		end
 	end)
 	registerTeardown(function()
