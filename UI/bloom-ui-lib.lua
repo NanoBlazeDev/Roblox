@@ -53,7 +53,7 @@ local Workspace = game:GetService("Workspace")
 local LocalPlayer = Players.LocalPlayer
 
 local Bloom = {}
-Bloom.Version = "0.2.1"
+Bloom.Version = "0.2.2"
 
 --------------------------------------------------------------------------
 -- Signal
@@ -4604,11 +4604,14 @@ function Window:_buildBuiltins()
 	look:Number("__pattern_alpha", { Label = "pattern strength", Min = 0, Max = 0.25, Step = 0.01,
 		Default = Bloom.Pattern.Alpha or current.PatternAlpha or 0.08, Callback = function(v)
 			Bloom.Pattern.Alpha = v
-			-- apply to ALL open windows/modules, not just the one hosting this slider,
-			-- so the strength change is reflected on every tab everywhere immediately
+			-- apply to ALL open windows/modules, not just the one hosting this slider.
+			-- animate=true creates a new tween that supersedes any in-flight tween
+			-- from a concurrent SelectTab (which otherwise finishes at the OLD alpha
+			-- and overwrites a direct ImageTransparency set — the race that broke
+			-- initial-load propagation to non-settings tabs).
 			for _, owner in patterns do
 				if type(owner) == "table" and owner._applyPattern then
-					pcall(function() owner:_applyPattern(false) end)
+					pcall(function() owner:_applyPattern(true) end)
 				end
 			end
 		end })
