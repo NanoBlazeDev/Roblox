@@ -149,7 +149,7 @@ local CFG_NAME = "umt_default"  -- config slot name inside Bloom's shared config
 local okMod, mod = pcall(function()
 	return Bloom:Module({
 		Name        = "umt toolkit",
-		Version     = "2.1",
+		Version     = "2.2",
 		Author      = "ExaVolt",
 		Description = "ultimate mining tycoon tools — ore xray, vehicle boost, flip+bring+drill-lock, flinger, fastmine, server hop",
 		AutoConfig  = CFG_NAME,  -- Bloom owns load/save lifecycle for us
@@ -1047,41 +1047,62 @@ do
 	end
 
 	-- Drill Lock Mode: snap vehicle's X-axis rotation (pitch) to nearest 90°
-	-- useful for Exa Drill: car wants to drill straight, physics tilts it, this keeps it clean
-	local drillLock = { active = false, conn = nil }
+	-- uses AlignOrientation constraint (hard-lock) + live yaw/roll tracking so
+	-- player can still steer. physics-level, не воюет с vehicle controller'ом.
+	local drillLock = { active = false, conn = nil, att = nil, align = nil, pp = nil }
 	local function stopDrillLock()
-		if drillLock.conn then pcall(function() drillLock.conn:Disconnect() end) end
-		drillLock.conn = nil
+		if drillLock.conn  then pcall(function() drillLock.conn:Disconnect() end) end
+		if drillLock.align then pcall(function() drillLock.align:Destroy()  end) end
+		if drillLock.att   then pcall(function() drillLock.att:Destroy()    end) end
+		drillLock.conn, drillLock.align, drillLock.att, drillLock.pp = nil, nil, nil, nil
 		drillLock.active = false
 	end
 	registerTeardown(stopDrillLock)
 
 	local function startDrillLock()
 		if drillLock.active then return end
+		local vb = myVehicleHere()
+		local model = vb and vb.Model
+		local pp = model and model.PrimaryPart
+		if not pp then
+			notify("drill lock", "no owned vehicle to lock", "error")
+			return
+		end
 		drillLock.active = true
-		local RunSvc = game:GetService("RunService")
+		drillLock.pp = pp
+
+		-- attachment on PP (local-space anchor for constraint)
+		local att = Instance.new("Attachment")
+		att.Name = "UMT_DrillLockAtt"
+		att.Parent = pp
+		drillLock.att = att
+
+		-- AlignOrientation with rigidity = hard lock (max torque, max velocity)
+		-- AllAxes locks everything, но мы каждый frame пересчитываем target
+		-- с live yaw/roll + snapped pitch, так что рулить можно
+		local align = Instance.new("AlignOrientation")
+		align.Attachment0 = att
+		align.Mode = Enum.OrientationAlignmentMode.OneAttachment
+		align.AlignType = Enum.AlignType.AllAxes
+		align.RigidityEnabled = true     -- hard constraint, no spring
+		align.ReactionTorqueEnabled = false
+		align.CFrame = pp.CFrame - pp.CFrame.Position  -- initial = current rot
+		align.Parent = pp
+		drillLock.align = align
+
 		local DEG2RAD = math.pi / 180
-		drillLock.conn = RunSvc.Heartbeat:Connect(function()
+		drillLock.conn = game:GetService("RunService").Heartbeat:Connect(function()
 			if not drillLock.active or _G.__umtSession ~= SESSION then stopDrillLock() return end
-			local vb = myVehicleHere()
-			local model = vb and vb.Model
-			local pp = model and model.PrimaryPart
-			if not pp then return end
-			local ori = pp.Orientation  -- Vector3 degrees (X pitch, Y yaw, Z roll)
-			local snapped = math.round(ori.X / 90) * 90
-			if math.abs(ori.X - snapped) > 1.5 then
-				local pos = pp.CFrame.Position
-				local newCF = CFrame.new(pos) * CFrame.fromOrientation(snapped * DEG2RAD, ori.Y * DEG2RAD, ori.Z * DEG2RAD)
-				pcall(function()
-					model:PivotTo(newCF)
-					for _, p in ipairs(model:GetDescendants()) do
-						if p:IsA("BasePart") then
-							local av = p.AssemblyAngularVelocity
-							p.AssemblyAngularVelocity = Vector3.new(0, av.Y, av.Z)
-						end
-					end
-				end)
+			-- vehicle might have changed (respawn, swap) — re-check
+			local vb2 = myVehicleHere()
+			local pp2 = vb2 and vb2.Model and vb2.Model.PrimaryPart
+			if pp2 ~= drillLock.pp or not pp2 or not pp2.Parent then
+				stopDrillLock(); return
 			end
+			local ori = pp2.Orientation  -- degrees (X pitch, Y yaw, Z roll)
+			local snappedX = math.round(ori.X / 90) * 90
+			-- target: snapped pitch + live yaw/roll (so steering + lean pass through)
+			align.CFrame = CFrame.fromOrientation(snappedX * DEG2RAD, ori.Y * DEG2RAD, ori.Z * DEG2RAD)
 		end)
 	end
 
@@ -1509,5 +1530,5 @@ mod:OnConfigLoaded(function(ok)
 end)
 
 _G.__umtClaim = nil  -- release concurrency lock
-print("[UMT] umt toolkit v2.1 loaded — 6 tabs ready, hotkeys rebindable, drill lock on U")
+print("[UMT] umt toolkit v2.2 loaded — 6 tabs, hotkeys rebindable, drill lock (AlignOrientation) on U")
 notify("umt toolkit", "loaded — 6 tabs, drill lock = U", "success")
