@@ -1190,21 +1190,24 @@ do
 	local tab = mod:Tab({ Name = "fastmine" })
 	local sec = tab:Section("static")
 
-	-- smart mode = server rate-limit emulation via hardness ratio.
-	-- Server tracks last block's (actual time, hardness) and computes rate.
-	-- For current block of hardness H, min safe actual = H × (prev_actual / prev_hardness).
-	-- Faster than that → server flags "too fast" (rate limit).
-	-- We return max(floor, min_safe) → maximum speedup server allows for this ore.
-	-- No time, no credit, no idle tracking — only previous mine's (actual, hardness).
+	-- smart mode = static baseline reacting to user's actual mining pace.
+	-- Baseline: actual = vanilla × mult (same as static, server-safe 2× speedup).
+	-- Bonus: if you were idle (gap between mines > previous mine duration),
+	-- the EXTRA idle seconds are subtracted from current actual, so one block
+	-- after a pause runs faster. Floor caps at vanilla × 0.1 (10× speedup max).
+	-- No credit variable, no hardness ratio, just gap − prevActual − cushion.
 	local state = {
 		active        = false,
 		mode          = "static",
-		mult          = 0.5,          -- static multiplier
-		burstMult     = 0.001,        -- smart: floor (vanilla × 0.001)
-		prevHardness  = 0,            -- smart: previous mined block's hardness
+		mult          = 0.5,          -- static multiplier (also smart baseline)
+		burstMult     = 0.1,          -- smart: floor (vanilla × 0.1 = 10× cap)
+		pollBaseline  = 0.1,          -- smart: cushion before idle counts
+		lastCall      = 0,            -- smart: tick() of last MTF call
 		prevActual    = 0,            -- smart: previous returned actual
 		lastVanilla   = 1,            -- smart: UI
 		lastMult      = 1,            -- smart: UI
+		lastGap       = 0,            -- smart: UI
+		lastIdle      = 0,            -- smart: UI
 		oldMTF        = nil,
 	}
 
@@ -1213,7 +1216,7 @@ do
 		if not _G.__umt_mtf_hooked then
 			_G.__umt_mtf_hooked = { target = MTF, original = nil }
 		end
-		state.prevHardness = 0
+		state.lastCall = tick()
 		state.prevActual = 0
 		local prev = hookfunction(MTF, function(speed, hardness, bh)
 			local vanilla = state.oldMTF(speed, hardness, bh)
@@ -1223,19 +1226,20 @@ do
 				return vanilla * state.mult
 			else
 				state.lastVanilla = vanilla
+				local now = tick()
+				local gap = now - state.lastCall
+				state.lastCall = now
+				state.lastGap = gap
+
+				-- idle = extra time since previous mine completed
+				local idle = math.max(0, gap - state.prevActual - state.pollBaseline)
+				state.lastIdle = idle
+
+				-- baseline (same as static) minus idle bonus, floored at 10× speedup
+				local base = vanilla * state.mult
 				local floor = vanilla * state.burstMult
-				local h = tonumber(hardness) or 1
+				local actual = math.max(floor, base - idle)
 
-				-- min safe actual = scale previous rate to current block's hardness
-				local safe
-				if state.prevHardness > 0 and state.prevActual > 0 then
-					safe = (h / state.prevHardness) * state.prevActual
-				else
-					safe = floor   -- first mine ever: start at the floor
-				end
-				local actual = math.max(floor, safe)
-
-				state.prevHardness = h
 				state.prevActual = actual
 				state.lastMult = (actual > 0) and (vanilla / actual) or 1
 				return actual
@@ -1279,8 +1283,8 @@ do
 				notify("fastmine smart", "auto rate", "success")
 			else disable() end
 		end })
-	sec2:Label("rate-safe: scales prev mine's time by hardness ratio of current block")
-	local liveLbl = sec2:Label("prev H: 0   prev actual: 0.00s   speedup: 1.00x")
+	sec2:Label("static baseline + idle bonus. floor at 10× speedup (vanilla × 0.1)")
+	local liveLbl = sec2:Label("gap: 0.00s   idle: 0.00s   vanilla: 1.0s   next: 1.00x   last: 1.00x")
 
 	local RS = game:GetService("RunService")
 	if _G.__umt_fastmine_live then pcall(function() _G.__umt_fastmine_live:Disconnect() end) end
@@ -1293,23 +1297,29 @@ do
 	end
 	_G.__umt_fastmine_live = RS.Heartbeat:Connect(function(dt)
 		if state.active and state.mode == "smart" then
-			local lv = tonumber(state.lastVanilla) or 1
-			local lm = tonumber(state.lastMult) or 1
-			local ph = tonumber(state.prevHardness) or 0
-			local pa = tonumber(state.prevActual) or 0
+			local g   = liveGap()
+			local lv  = tonumber(state.lastVanilla) or 1
+			local lm  = tonumber(state.lastMult) or 1
+			local pa  = tonumber(state.prevActual) or 0
+			local liveIdle = math.max(0, g - pa - state.pollBaseline)
+			local base = lv * state.mult
+			local floor = lv * state.burstMult
+			local nextActual = math.max(floor, base - liveIdle)
+			local nextSpeedup = (nextActual > 0) and (lv / nextActual) or 1
 			pcall(function()
-				liveLbl:Set(string.format("prev H: %.0f   prev actual: %.3fs   speedup: %.2fx",
-					ph, pa, lm))
+				liveLbl:Set(string.format("gap: %.2fs   idle: %.2fs   vanilla: %.1fs   next: %.2fx   last: %.2fx",
+					g, liveIdle, lv, nextSpeedup, lm))
 			end)
 		end
 		if tick() - lastDiag > 2 then
 			lastDiag = tick()
+			local g  = liveGap()
 			local lv = tonumber(state.lastVanilla) or 0
 			local lm = tonumber(state.lastMult) or 0
-			local ph = tonumber(state.prevHardness) or 0
+			local li = tonumber(state.lastIdle) or 0
 			local pa = tonumber(state.prevActual) or 0
-			print(string.format("[fastmine] active=%s mode=%s prevH=%.0f prevActual=%.4fs vanilla=%.2fs speedup=%.2f",
-				tostring(state.active), tostring(state.mode), ph, pa, lv, lm))
+			print(string.format("[fastmine] active=%s mode=%s gap=%.2fs idle=%.2fs vanilla=%.2fs prev=%.2fs speedup=%.2f",
+				tostring(state.active), tostring(state.mode), g, li, lv, pa, lm))
 		end
 	end)
 	registerTeardown(function()
@@ -1461,5 +1471,5 @@ mod:OnConfigLoaded(function(ok)
 end)
 
 _G.__umtClaim = nil
-print("[UMT] umt toolkit v2.1.9 loaded — smart = hardness-ratio rate-limit emulation")
-notify("umt toolkit", "v2.1.9 — hardness ratio", "success")
+print("[UMT] umt toolkit v2.1.10 loaded — smart = base + idle bonus, 10× floor cap")
+notify("umt toolkit", "v2.1.10 — reasonable cap", "success")
