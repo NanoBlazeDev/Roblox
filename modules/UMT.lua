@@ -1190,25 +1190,27 @@ do
 	local tab = mod:Tab({ Name = "fastmine" })
 	local sec = tab:Section("static")
 
-	-- smart mode = stateless "max allowed speed" model.
-	-- Server rate limit assumes continuous mining at vanilla pace. Any real
-	-- time between MTF calls (gap) is unused budget that can be spent on the
-	-- NEXT block. Formula: actual = max(vanilla × burstMult, vanilla - gap).
-	--   Big gap (idle): block takes near-zero time (burst)
-	--   Small gap (0.1-1s pause): block slightly faster than vanilla
-	--   No gap (sustained poll): block at vanilla
-	-- No persistent credit var — each call is self-contained.
-	-- v2.1.2: dropped credit accumulation entirely. Rate = pure gap-based.
+	-- smart mode = static baseline + idle bonus.
+	-- Server rate limit allows continuous mining at vanilla pace (= 1x). Static
+	-- mode cheats slightly below that (0.75x) which server tolerates.
+	-- Smart: starts from static baseline, then subtracts REAL idle time
+	-- (gap minus previous mine's reserved duration) to reach up to burstMult floor.
+	--   actual = max(vanilla × burstMult, vanilla × mult − idle)
+	--   idle = max(0, gap − prevActual − pollBaseline)
+	-- No persistent credit, each hook call self-contained.
+	-- v2.1.3: subtracts prevActual so continuous mining doesn't look like pause.
 	local state = {
 		active        = false,
 		mode          = "static",
-		mult          = 0.75,         -- static multiplier
-		burstMult     = 0.05,         -- smart: floor (max speedup cap)
-		pollBaseline  = 0.3,          -- smart: gap below this = sustained polling, no credit
+		mult          = 0.75,         -- static multiplier (also smart baseline)
+		burstMult     = 0.05,         -- smart: floor (max burst cap = 20x)
+		pollBaseline  = 0.1,          -- smart: human-reaction cushion before idle counts
 		lastCall      = 0,            -- smart: tick() of last MTF call
+		prevActual    = 0,            -- smart: previous mine's returned duration
 		lastVanilla   = 1,            -- smart: UI
 		lastMult      = 1,            -- smart: UI
 		lastGap       = 0,            -- smart: UI
+		lastIdle      = 0,            -- smart: UI
 		oldMTF        = nil,
 	}
 
@@ -1228,12 +1230,16 @@ do
 				state.lastCall = now
 				state.lastGap = gap
 
-				-- "allowed time" for this block = vanilla pace minus unused budget
-				-- unused budget = gap beyond the 0.3s poll baseline
-				-- clamped below by burstMult × vanilla (safety floor)
-				local saved = math.max(0, gap - state.pollBaseline)
-				local actual = math.max(vanilla * state.burstMult, vanilla - saved)
+				-- idle = time since previous mine completed (gap minus its duration)
+				-- minus small cushion for human reaction
+				local idle = math.max(0, gap - state.prevActual - state.pollBaseline)
+				state.lastIdle = idle
 
+				-- base = vanilla × mult (same as static); idle subtracts further seconds
+				local base = vanilla * state.mult
+				local actual = math.max(vanilla * state.burstMult, base - idle)
+
+				state.prevActual = actual
 				state.lastMult = (actual > 0) and (vanilla / actual) or 1
 				return actual
 			end
@@ -1276,8 +1282,8 @@ do
 				notify("fastmine smart", "auto rate", "success")
 			else disable() end
 		end })
-	sec2:Label("auto-rate: gap since last mine = unused budget → applied to next block")
-	local liveLbl = sec2:Label("gap: 0.00s   vanilla: 1.0s   speedup: 1.00x")
+	sec2:Label("static baseline + idle bonus. idle = (gap − prev mine duration − 0.1s)")
+	local liveLbl = sec2:Label("gap: 0.00s   idle: 0.00s   vanilla: 1.0s   speedup: 1.00x")
 
 	local RS = game:GetService("RunService")
 	if _G.__umt_fastmine_live then pcall(function() _G.__umt_fastmine_live:Disconnect() end) end
@@ -1293,12 +1299,14 @@ do
 			local g   = liveGap()
 			local lv  = tonumber(state.lastVanilla) or 1
 			local lm  = tonumber(state.lastMult) or 1
-			local saved = math.max(0, g - state.pollBaseline)
-			local nextActual = math.max(lv * state.burstMult, lv - saved)
+			local pa  = tonumber(state.prevActual) or 0
+			local liveIdle = math.max(0, g - pa - state.pollBaseline)
+			local base = lv * state.mult
+			local nextActual = math.max(lv * state.burstMult, base - liveIdle)
 			local nextSpeedup = (nextActual > 0) and (lv / nextActual) or 1
 			pcall(function()
-				liveLbl:Set(string.format("gap: %.2fs   vanilla: %.1fs   next: %.2fx   last: %.2fx",
-					g, lv, nextSpeedup, lm))
+				liveLbl:Set(string.format("gap: %.2fs   idle: %.2fs   vanilla: %.1fs   next: %.2fx   last: %.2fx",
+					g, liveIdle, lv, nextSpeedup, lm))
 			end)
 		end
 		if tick() - lastDiag > 2 then
@@ -1306,8 +1314,10 @@ do
 			local g  = liveGap()
 			local lv = tonumber(state.lastVanilla) or 0
 			local lm = tonumber(state.lastMult) or 0
-			print(string.format("[fastmine] active=%s mode=%s gap=%.2fs vanilla=%.2fs lastSpeedup=%.2f",
-				tostring(state.active), tostring(state.mode), g, lv, lm))
+			local li = tonumber(state.lastIdle) or 0
+			local pa = tonumber(state.prevActual) or 0
+			print(string.format("[fastmine] active=%s mode=%s gap=%.2fs idle=%.2fs vanilla=%.2fs prev=%.2fs lastSpeedup=%.2f",
+				tostring(state.active), tostring(state.mode), g, li, lv, pa, lm))
 		end
 	end)
 	registerTeardown(function()
@@ -1459,5 +1469,5 @@ mod:OnConfigLoaded(function(ok)
 end)
 
 _G.__umtClaim = nil
-print("[UMT] umt toolkit v2.1.2 loaded — smart fastmine stateless gap-model")
-notify("umt toolkit", "v2.1.2 — smart = gap-based", "success")
+print("[UMT] umt toolkit v2.1.3 loaded — smart = static baseline + idle bonus")
+notify("umt toolkit", "v2.1.3 — smart baseline + idle", "success")
