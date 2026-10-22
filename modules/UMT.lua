@@ -1190,22 +1190,26 @@ do
 	local tab = mod:Tab({ Name = "fastmine" })
 	local sec = tab:Section("static")
 
-	-- smart mode = credit bucket mirror of server's rate limit.
-	-- credit accumulates real seconds between MTF calls (capped), so idle
-	-- time between veins grows it. First block of a vein, if credit ≥ vanilla,
-	-- gets an instant burst and DRAINS ALL credit — the rest of the vein runs
-	-- at vanilla*0.95 (small human factor). No stockpiling → no multi-block
-	-- bursts in a row, no server rollback.
+	-- smart mode = stateless "max allowed speed" model.
+	-- Server rate limit assumes continuous mining at vanilla pace. Any real
+	-- time between MTF calls (gap) is unused budget that can be spent on the
+	-- NEXT block. Formula: actual = max(vanilla × burstMult, vanilla - gap).
+	--   Big gap (idle): block takes near-zero time (burst)
+	--   Small gap (0.1-1s pause): block slightly faster than vanilla
+	--   No gap (sustained poll): block at vanilla
+	-- No persistent credit var — each call is self-contained.
+	-- v2.1.2: dropped credit accumulation entirely. Rate = pure gap-based.
 	local state = {
-		active       = false,
-		mode         = "static",
-		mult         = 0.75,         -- static multiplier
-		credit       = 0,            -- smart: accumulated idle seconds
-		cap          = 15,           -- smart: credit cap (seconds)
-		lastCall     = 0,            -- smart: tick() of last MTF call
-		lastVanilla  = 1,            -- smart: UI
-		lastMult     = 1,            -- smart: UI
-		oldMTF       = nil,
+		active        = false,
+		mode          = "static",
+		mult          = 0.75,         -- static multiplier
+		burstMult     = 0.05,         -- smart: floor (max speedup cap)
+		pollBaseline  = 0.3,          -- smart: gap below this = sustained polling, no credit
+		lastCall      = 0,            -- smart: tick() of last MTF call
+		lastVanilla   = 1,            -- smart: UI
+		lastMult      = 1,            -- smart: UI
+		lastGap       = 0,            -- smart: UI
+		oldMTF        = nil,
 	}
 
 	local function enable()
@@ -1220,24 +1224,15 @@ do
 			else
 				state.lastVanilla = vanilla
 				local now = tick()
-				local dt = now - state.lastCall
+				local gap = now - state.lastCall
 				state.lastCall = now
-				-- credit = idle seconds between real pauses (not polling).
-				-- MTF polls at ~0.07-0.3s during active mining, so dt>0.3 ≈ real gap.
-				-- Subtract the 0.3s baseline so only true idle grows credit.
-				if dt > 0.3 then
-					state.credit = math.min(state.credit + (dt - 0.3), state.cap)
-				end
+				state.lastGap = gap
 
-				local actual
-				if state.credit >= vanilla then
-					-- enough idle for one burst → instant, drain ALL credit
-					actual = vanilla * 0.1
-					state.credit = 0
-				else
-					-- sustained mining → vanilla + small human factor
-					actual = vanilla * 0.95
-				end
+				-- "allowed time" for this block = vanilla pace minus unused budget
+				-- unused budget = gap beyond the 0.3s poll baseline
+				-- clamped below by burstMult × vanilla (safety floor)
+				local saved = math.max(0, gap - state.pollBaseline)
+				local actual = math.max(vanilla * state.burstMult, vanilla - saved)
 
 				state.lastMult = (actual > 0) and (vanilla / actual) or 1
 				return actual
@@ -1281,43 +1276,38 @@ do
 				notify("fastmine smart", "auto rate", "success")
 			else disable() end
 		end })
-	sec2:Label("first block of a vein = instant (if credit ≥ vanilla), rest = 0.95x")
-	local liveLbl = sec2:Label("credit: 0.0s / 15s   vanilla: 1.0s   last mult: 1.0x")
+	sec2:Label("auto-rate: gap since last mine = unused budget → applied to next block")
+	local liveLbl = sec2:Label("gap: 0.00s   vanilla: 1.0s   speedup: 1.00x")
 
 	local RS = game:GetService("RunService")
 	if _G.__umt_fastmine_live then pcall(function() _G.__umt_fastmine_live:Disconnect() end) end
 	local lastDiag = 0
-	-- UI only extrapolates credit so it reflects idle time between MTF calls.
-	-- Actual credit growth happens only inside MTF hook (gap > 0.3s rule),
-	-- so what you see == what next mine will use.
-	local function liveCredit()
-		local cr = tonumber(state.credit) or 0
+	-- Live gap = time since last MTF call (what will be saved on next mine).
+	-- Caps display at vanilla so UI doesn't scream BIG numbers while idle forever.
+	local function liveGap()
 		local now = tick()
-		local gap = now - (tonumber(state.lastCall) or 0)
-		if gap > 0.3 then
-			cr = math.min(cr + (gap - 0.3), state.cap)
-		end
-		return cr
+		return now - (tonumber(state.lastCall) or now)
 	end
 	_G.__umt_fastmine_live = RS.Heartbeat:Connect(function(dt)
 		if state.active and state.mode == "smart" then
-			local cr  = liveCredit()
-			local cap = tonumber(state.cap) or 15
+			local g   = liveGap()
 			local lv  = tonumber(state.lastVanilla) or 1
 			local lm  = tonumber(state.lastMult) or 1
-			local ready = cr >= lv
+			local saved = math.max(0, g - state.pollBaseline)
+			local nextActual = math.max(lv * state.burstMult, lv - saved)
+			local nextSpeedup = (nextActual > 0) and (lv / nextActual) or 1
 			pcall(function()
-				liveLbl:Set(string.format("credit: %.1fs / %.0fs   vanilla: %.1fs   %s   last mult: %.2fx",
-					cr, cap, lv, ready and "READY" or "wait", lm))
+				liveLbl:Set(string.format("gap: %.2fs   vanilla: %.1fs   next: %.2fx   last: %.2fx",
+					g, lv, nextSpeedup, lm))
 			end)
 		end
 		if tick() - lastDiag > 2 then
 			lastDiag = tick()
-			local cr = liveCredit()
+			local g  = liveGap()
 			local lv = tonumber(state.lastVanilla) or 0
 			local lm = tonumber(state.lastMult) or 0
-			print(string.format("[fastmine] active=%s mode=%s credit=%.2fs vanilla=%.2fs lastMult=%.2f",
-				tostring(state.active), tostring(state.mode), cr, lv, lm))
+			print(string.format("[fastmine] active=%s mode=%s gap=%.2fs vanilla=%.2fs lastSpeedup=%.2f",
+				tostring(state.active), tostring(state.mode), g, lv, lm))
 		end
 	end)
 	registerTeardown(function()
@@ -1469,5 +1459,5 @@ mod:OnConfigLoaded(function(ok)
 end)
 
 _G.__umtClaim = nil
-print("[UMT] umt toolkit v2.1 loaded — 6 tabs, hotkeys rebindable, drill lock (DirectCFrame) on U")
-notify("umt toolkit", "loaded — 6 tabs, drill lock = U", "success")
+print("[UMT] umt toolkit v2.1.2 loaded — smart fastmine stateless gap-model")
+notify("umt toolkit", "v2.1.2 — smart = gap-based", "success")
