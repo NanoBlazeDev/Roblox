@@ -1222,6 +1222,8 @@ do
 			local vanilla = state.oldMTF(speed, hardness, bh)
 			-- skip unmineable blocks (walls/air hover polls return absurd vanilla ~9999999)
 			if vanilla and vanilla > 1e6 then return vanilla end
+			-- skip trivial-vanilla polls (auto-mined easy blocks) — don't let them reset lastCall
+			if vanilla and vanilla < 1 then return vanilla * state.mult end
 			if state.mode == "static" then
 				return vanilla * state.mult
 			else
@@ -1316,10 +1318,15 @@ do
 			local g  = liveGap()
 			local lv = tonumber(state.lastVanilla) or 0
 			local lm = tonumber(state.lastMult) or 0
-			local li = tonumber(state.lastIdle) or 0
 			local pa = tonumber(state.prevActual) or 0
-			print(string.format("[fastmine] active=%s mode=%s gap=%.2fs idle=%.2fs vanilla=%.2fs prev=%.2fs speedup=%.2f",
-				tostring(state.active), tostring(state.mode), g, li, lv, pa, lm))
+			-- live idle: pretend hook fires NOW with current gap
+			local liveIdle = math.max(0, g - pa - state.pollBaseline)
+			local base = lv * state.mult
+			local floor = lv * state.burstMult
+			local nextActual = math.max(floor, base - liveIdle)
+			local nextSpeedup = (nextActual > 0) and (lv / nextActual) or 1
+			print(string.format("[fastmine] active=%s mode=%s gap=%.2fs idle=%.2fs vanilla=%.2fs prev=%.2fs last=%.2fx next=%.2fx",
+				tostring(state.active), tostring(state.mode), g, liveIdle, lv, pa, lm, nextSpeedup))
 		end
 	end)
 	registerTeardown(function()
@@ -1471,5 +1478,5 @@ mod:OnConfigLoaded(function(ok)
 end)
 
 _G.__umtClaim = nil
-print("[UMT] umt toolkit v2.1.10 loaded — smart = base + idle bonus, 10× floor cap")
-notify("umt toolkit", "v2.1.10 — reasonable cap", "success")
+print("[UMT] umt toolkit v2.1.11 loaded — filter trivial polls, diag shows live next-speedup")
+notify("umt toolkit", "v2.1.11 — poll filter", "success")
