@@ -1225,6 +1225,8 @@ do
 		end
 		local prev = hookfunction(MTF, function(speed, hardness, bh)
 			local vanilla = state.oldMTF(speed, hardness, bh)
+			-- skip unmineable blocks (walls/air hover polls return absurd vanilla ~9999999)
+			if vanilla and vanilla > 1e6 then return vanilla end
 			if state.mode == "static" then
 				return vanilla * state.mult
 			else
@@ -1492,5 +1494,5 @@ mod:OnConfigLoaded(function(ok)
 end)
 
 _G.__umtClaim = nil
-print("[UMT] umt toolkit v2.1.5 loaded — token bucket smart fastmine (credit spreads across blocks)")
-notify("umt toolkit", "v2.1.5 — token bucket", "success")
+print("[UMT] umt toolkit v2.1.6 loaded — token bucket + skip unmineable polls (vanilla > 1e6)")
+notify("umt toolkit", "v2.1.6 — skip unmineable", "success")
