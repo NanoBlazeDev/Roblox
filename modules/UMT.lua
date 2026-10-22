@@ -1203,7 +1203,7 @@ do
 		active        = false,
 		mode          = "static",
 		mult          = 0.75,         -- static multiplier (also smart baseline)
-		burstMult     = 0.05,         -- smart: floor (max burst cap = 20x)
+		burstMult     = 0.002,        -- smart: floor (max burst = 500x; vanilla × 0.002 = 10ms for 5s block)
 		pollBaseline  = 0.1,          -- smart: human-reaction cushion before idle counts
 		lastCall      = 0,            -- smart: tick() of last MTF call
 		prevActual    = 0,            -- smart: previous mine's returned duration
@@ -1283,6 +1283,9 @@ do
 			else disable() end
 		end })
 	sec2:Label("static baseline + idle bonus. idle = (gap − prev mine duration − 0.1s)")
+	local fmBurst = sec2:Number("fastmine_burst_floor", { Label = "burst floor (vanilla × this)",
+		Default = 0.002, Min = 0.001, Max = 0.5, Step = 0.001,
+		Callback = function(v) state.burstMult = v end })
 	local liveLbl = sec2:Label("gap: 0.00s   idle: 0.00s   vanilla: 1.0s   speedup: 1.00x")
 
 	local RS = game:GetService("RunService")
@@ -1469,5 +1472,5 @@ mod:OnConfigLoaded(function(ok)
 end)
 
 _G.__umtClaim = nil
-print("[UMT] umt toolkit v2.1.3 loaded — smart = static baseline + idle bonus")
-notify("umt toolkit", "v2.1.3 — smart baseline + idle", "success")
+print("[UMT] umt toolkit v2.1.4 loaded — burst floor configurable (0.002 default = 500x cap)")
+notify("umt toolkit", "v2.1.4 — burst floor slider", "success")
