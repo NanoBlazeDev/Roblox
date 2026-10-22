@@ -1223,6 +1223,10 @@ do
 		if not _G.__umt_mtf_hooked then
 			_G.__umt_mtf_hooked = { target = MTF, original = nil }
 		end
+		-- fresh start: don't let the first hook call see gap=tick()
+		state.lastCall = tick()
+		state.credit = 0
+		state.prevActual = 0
 		local prev = hookfunction(MTF, function(speed, hardness, bh)
 			local vanilla = state.oldMTF(speed, hardness, bh)
 			-- skip unmineable blocks (walls/air hover polls return absurd vanilla ~9999999)
@@ -1494,5 +1498,5 @@ mod:OnConfigLoaded(function(ok)
 end)
 
 _G.__umtClaim = nil
-print("[UMT] umt toolkit v2.1.6 loaded — token bucket + skip unmineable polls (vanilla > 1e6)")
-notify("umt toolkit", "v2.1.6 — skip unmineable", "success")
+print("[UMT] umt toolkit v2.1.7 loaded — reset credit on enable (no free burst at init)")
+notify("umt toolkit", "v2.1.7 — init-safe", "success")
