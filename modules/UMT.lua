@@ -1190,20 +1190,21 @@ do
 	local tab = mod:Tab({ Name = "fastmine" })
 	local sec = tab:Section("static")
 
-	-- smart mode is pure token-bucket mirror of the server's rate limit:
-	-- credit += dt each tick, each mine consumes vanilla_time regardless of
-	-- actual time taken. speed_mult = credit / vanilla_time (no user cap).
-	-- credit itself is capped only to prevent one-session infinite accumulation.
-	-- smart = idle-detector. If time since last mine ≥ vanilla, you've
-	-- "earned" one burst. First block in a vein = instant. Next blocks =
-	-- vanilla (+ small human factor). No stockpiling, no multi-block bursts.
+	-- smart mode = credit bucket mirror of server's rate limit.
+	-- credit accumulates real seconds between MTF calls (capped), so idle
+	-- time between veins grows it. First block of a vein, if credit ≥ vanilla,
+	-- gets an instant burst and DRAINS ALL credit — the rest of the vein runs
+	-- at vanilla*0.95 (small human factor). No stockpiling → no multi-block
+	-- bursts in a row, no server rollback.
 	local state = {
 		active       = false,
 		mode         = "static",
 		mult         = 0.75,         -- static multiplier
-		lastMineAt   = 0,            -- smart: tick() when last block mined
-		lastVanilla  = 1,            -- smart: for UI
-		lastMult     = 1,            -- smart: last applied speed_mult (for UI)
+		credit       = 0,            -- smart: accumulated idle seconds
+		cap          = 15,           -- smart: credit cap (seconds)
+		lastCall     = 0,            -- smart: tick() of last MTF call
+		lastVanilla  = 1,            -- smart: UI
+		lastMult     = 1,            -- smart: UI
 		oldMTF       = nil,
 	}
 
@@ -1212,8 +1213,6 @@ do
 		if not _G.__umt_mtf_hooked then
 			_G.__umt_mtf_hooked = { target = MTF, original = nil }
 		end
-		-- don't reset credit — it accumulates in real time via Heartbeat below,
-		-- so even when just enabled it reflects actual idle time
 		local prev = hookfunction(MTF, function(speed, hardness, bh)
 			local vanilla = state.oldMTF(speed, hardness, bh)
 			if state.mode == "static" then
@@ -1221,19 +1220,25 @@ do
 			else
 				state.lastVanilla = vanilla
 				local now = tick()
-				local idle = now - state.lastMineAt
-				-- idle at least 1 vanilla worth → one instant block; else vanilla
-				-- human factor: 0.95× vanilla on sustained mining
-				local actual
-				if idle >= vanilla then
-					actual = vanilla * 0.1       -- instant burst
-				else
-					actual = vanilla * 0.95       -- human factor
+				local dt = now - state.lastCall
+				state.lastCall = now
+				-- credit = idle seconds between real pauses (not polling).
+				-- MTF polls at ~0.07-0.3s during active mining, so dt>0.3 ≈ real gap.
+				-- Subtract the 0.3s baseline so only true idle grows credit.
+				if dt > 0.3 then
+					state.credit = math.min(state.credit + (dt - 0.3), state.cap)
 				end
-				-- update timestamp on EVERY call (poll or real mine). Active play
-				-- resets idle to ~0; walking away lets it grow. First call after
-				-- a gap gets the burst, nothing after it until next gap.
-				state.lastMineAt = now
+
+				local actual
+				if state.credit >= vanilla then
+					-- enough idle for one burst → instant, drain ALL credit
+					actual = vanilla * 0.1
+					state.credit = 0
+				else
+					-- sustained mining → vanilla + small human factor
+					actual = vanilla * 0.95
+				end
+
 				state.lastMult = (actual > 0) and (vanilla / actual) or 1
 				return actual
 			end
@@ -1276,33 +1281,43 @@ do
 				notify("fastmine smart", "auto rate", "success")
 			else disable() end
 		end })
-	sec2:Label("auto-takes max speed from accumulated idle credit (no knobs)")
-	local liveLbl = sec2:Label("credit: 0.0s   last mult: 1.0x")
+	sec2:Label("first block of a vein = instant (if credit ≥ vanilla), rest = 0.95x")
+	local liveLbl = sec2:Label("credit: 0.0s / 15s   vanilla: 1.0s   last mult: 1.0x")
 
 	local RS = game:GetService("RunService")
 	if _G.__umt_fastmine_live then pcall(function() _G.__umt_fastmine_live:Disconnect() end) end
 	local lastDiag = 0
+	-- UI only extrapolates credit so it reflects idle time between MTF calls.
+	-- Actual credit growth happens only inside MTF hook (gap > 0.3s rule),
+	-- so what you see == what next mine will use.
+	local function liveCredit()
+		local cr = tonumber(state.credit) or 0
+		local now = tick()
+		local gap = now - (tonumber(state.lastCall) or 0)
+		if gap > 0.3 then
+			cr = math.min(cr + (gap - 0.3), state.cap)
+		end
+		return cr
+	end
 	_G.__umt_fastmine_live = RS.Heartbeat:Connect(function(dt)
 		if state.active and state.mode == "smart" then
-			local lv = tonumber(state.lastVanilla) or 1
-			local lma = tonumber(state.lastMineAt) or 0
-			local lm = tonumber(state.lastMult) or 1
-			local idle = tick() - lma
-			local ready = idle >= lv
+			local cr  = liveCredit()
+			local cap = tonumber(state.cap) or 15
+			local lv  = tonumber(state.lastVanilla) or 1
+			local lm  = tonumber(state.lastMult) or 1
+			local ready = cr >= lv
 			pcall(function()
-				liveLbl:Set(string.format("idle: %.1fs / %.1fs   %s   last mult: %.1fx",
-					math.min(idle, lv * 2), lv,
-					ready and "READY" or "waiting", lm))
+				liveLbl:Set(string.format("credit: %.1fs / %.0fs   vanilla: %.1fs   %s   last mult: %.2fx",
+					cr, cap, lv, ready and "READY" or "wait", lm))
 			end)
 		end
 		if tick() - lastDiag > 2 then
 			lastDiag = tick()
-			local lma = tonumber(state.lastMineAt) or 0
-			local lv  = tonumber(state.lastVanilla) or 0
-			local lm  = tonumber(state.lastMult) or 0
-			print(string.format("[fastmine] active=%s mode=%s idle=%.2fs vanilla=%.2fs lastMult=%.2f",
-				tostring(state.active), tostring(state.mode),
-				tick() - lma, lv, lm))
+			local cr = liveCredit()
+			local lv = tonumber(state.lastVanilla) or 0
+			local lm = tonumber(state.lastMult) or 0
+			print(string.format("[fastmine] active=%s mode=%s credit=%.2fs vanilla=%.2fs lastMult=%.2f",
+				tostring(state.active), tostring(state.mode), cr, lv, lm))
 		end
 	end)
 	registerTeardown(function()
