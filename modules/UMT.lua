@@ -1190,31 +1190,21 @@ do
 	local tab = mod:Tab({ Name = "fastmine" })
 	local sec = tab:Section("static")
 
-	-- smart mode = token bucket distributing accumulated idle across multiple blocks.
-	-- Credit grows during idle (gap > prev mine duration + poll cushion).
-	-- Each mine spends up to (base - floor) credit, reducing actual block time.
-	-- Rest of credit stays in bucket for next blocks → bursts last multiple blocks.
-	--   credit += max(0, gap - prevActual - pollBaseline)
-	--   burst = min(credit, base - vanilla × burstMult)
-	--   actual = base - burst; credit -= burst
-	-- Continuous mining → credit stays 0 → actual = base = static-like speedup.
-	-- Short pause → credit small → one slightly-faster block.
-	-- Long idle → credit big → many blocks at burst floor until drained.
-	-- v2.1.5: token bucket with burstFloor configurable in UI.
+	-- smart mode = server rate-limit emulation via hardness ratio.
+	-- Server tracks last block's (actual time, hardness) and computes rate.
+	-- For current block of hardness H, min safe actual = H × (prev_actual / prev_hardness).
+	-- Faster than that → server flags "too fast" (rate limit).
+	-- We return max(floor, min_safe) → maximum speedup server allows for this ore.
+	-- No time, no credit, no idle tracking — only previous mine's (actual, hardness).
 	local state = {
 		active        = false,
 		mode          = "static",
-		mult          = 0.75,         -- static multiplier (also smart baseline)
-		burstMult     = 0.001,        -- smart: floor (max burst = 1000x; vanilla × 0.001 = 5ms for 5s block)
-		pollBaseline  = 0.1,          -- smart: human-reaction cushion before idle counts
-		credit        = 0,            -- smart: accumulated idle budget (seconds)
-		cap           = 60,           -- smart: credit cap (so burst isn't infinite after very long AFK)
-		lastCall      = 0,            -- smart: tick() of last MTF call
-		prevActual    = 0,            -- smart: previous mine's returned duration
+		mult          = 0.5,          -- static multiplier
+		burstMult     = 0.001,        -- smart: floor (vanilla × 0.001)
+		prevHardness  = 0,            -- smart: previous mined block's hardness
+		prevActual    = 0,            -- smart: previous returned actual
 		lastVanilla   = 1,            -- smart: UI
 		lastMult      = 1,            -- smart: UI
-		lastGap       = 0,            -- smart: UI
-		lastIdle      = 0,            -- smart: UI
 		oldMTF        = nil,
 	}
 
@@ -1223,9 +1213,7 @@ do
 		if not _G.__umt_mtf_hooked then
 			_G.__umt_mtf_hooked = { target = MTF, original = nil }
 		end
-		-- fresh start: don't let the first hook call see gap=tick()
-		state.lastCall = tick()
-		state.credit = 0
+		state.prevHardness = 0
 		state.prevActual = 0
 		local prev = hookfunction(MTF, function(speed, hardness, bh)
 			local vanilla = state.oldMTF(speed, hardness, bh)
@@ -1235,26 +1223,19 @@ do
 				return vanilla * state.mult
 			else
 				state.lastVanilla = vanilla
-				local now = tick()
-				local gap = now - state.lastCall
-				state.lastCall = now
-				state.lastGap = gap
-
-				-- deposit this call's idle (beyond prev mine duration) into credit bucket
-				local idle = math.max(0, gap - state.prevActual - state.pollBaseline)
-				state.credit = math.min(state.credit + idle, state.cap)
-				state.lastIdle = idle
-
-				-- spend up to (base - floor) credit on this block
-				local base = vanilla * state.mult
 				local floor = vanilla * state.burstMult
-				local maxBurst = base - floor
-				local burst = math.min(state.credit, math.max(0, maxBurst))
-				state.credit = state.credit - burst
+				local h = tonumber(hardness) or 1
 
-				local actual = base - burst
-				if actual < floor then actual = floor end
+				-- min safe actual = scale previous rate to current block's hardness
+				local safe
+				if state.prevHardness > 0 and state.prevActual > 0 then
+					safe = (h / state.prevHardness) * state.prevActual
+				else
+					safe = floor   -- first mine ever: start at the floor
+				end
+				local actual = math.max(floor, safe)
 
+				state.prevHardness = h
 				state.prevActual = actual
 				state.lastMult = (actual > 0) and (vanilla / actual) or 1
 				return actual
@@ -1298,14 +1279,8 @@ do
 				notify("fastmine smart", "auto rate", "success")
 			else disable() end
 		end })
-	sec2:Label("token bucket: idle → credit → spread across next mines")
-	local fmBurst = sec2:Number("fastmine_burst_floor", { Label = "burst floor (vanilla × this)",
-		Default = 0.001, Min = 0.0005, Max = 0.5, Step = 0.0005,
-		Callback = function(v) state.burstMult = v end })
-	local fmCap = sec2:Number("fastmine_credit_cap", { Label = "credit cap (seconds)",
-		Default = 60, Min = 5, Max = 300, Step = 5,
-		Callback = function(v) state.cap = v end })
-	local liveLbl = sec2:Label("credit: 0.0s / 60s   gap: 0.00s   vanilla: 1.0s   speedup: 1.00x")
+	sec2:Label("rate-safe: scales prev mine's time by hardness ratio of current block")
+	local liveLbl = sec2:Label("prev H: 0   prev actual: 0.00s   speedup: 1.00x")
 
 	local RS = game:GetService("RunService")
 	if _G.__umt_fastmine_live then pcall(function() _G.__umt_fastmine_live:Disconnect() end) end
@@ -1318,35 +1293,23 @@ do
 	end
 	_G.__umt_fastmine_live = RS.Heartbeat:Connect(function(dt)
 		if state.active and state.mode == "smart" then
-			local g   = liveGap()
-			local lv  = tonumber(state.lastVanilla) or 1
-			local lm  = tonumber(state.lastMult) or 1
-			local pa  = tonumber(state.prevActual) or 0
-			local cr  = tonumber(state.credit) or 0
-			local cap = tonumber(state.cap) or 60
-			-- live credit = stored + what next call would add
-			local liveAdd = math.max(0, g - pa - state.pollBaseline)
-			local liveCr  = math.min(cr + liveAdd, cap)
-			local base = lv * state.mult
-			local floor = lv * state.burstMult
-			local burst = math.min(liveCr, math.max(0, base - floor))
-			local nextActual = math.max(floor, base - burst)
-			local nextSpeedup = (nextActual > 0) and (lv / nextActual) or 1
+			local lv = tonumber(state.lastVanilla) or 1
+			local lm = tonumber(state.lastMult) or 1
+			local ph = tonumber(state.prevHardness) or 0
+			local pa = tonumber(state.prevActual) or 0
 			pcall(function()
-				liveLbl:Set(string.format("credit: %.1fs / %.0fs   gap: %.2fs   vanilla: %.1fs   next: %.2fx   last: %.2fx",
-					liveCr, cap, g, lv, nextSpeedup, lm))
+				liveLbl:Set(string.format("prev H: %.0f   prev actual: %.3fs   speedup: %.2fx",
+					ph, pa, lm))
 			end)
 		end
 		if tick() - lastDiag > 2 then
 			lastDiag = tick()
-			local g  = liveGap()
 			local lv = tonumber(state.lastVanilla) or 0
 			local lm = tonumber(state.lastMult) or 0
-			local li = tonumber(state.lastIdle) or 0
+			local ph = tonumber(state.prevHardness) or 0
 			local pa = tonumber(state.prevActual) or 0
-			local cr = tonumber(state.credit) or 0
-			print(string.format("[fastmine] active=%s mode=%s credit=%.2fs gap=%.2fs idle=%.2fs vanilla=%.2fs prev=%.2fs speedup=%.2f",
-				tostring(state.active), tostring(state.mode), cr, g, li, lv, pa, lm))
+			print(string.format("[fastmine] active=%s mode=%s prevH=%.0f prevActual=%.4fs vanilla=%.2fs speedup=%.2f",
+				tostring(state.active), tostring(state.mode), ph, pa, lv, lm))
 		end
 	end)
 	registerTeardown(function()
@@ -1498,5 +1461,5 @@ mod:OnConfigLoaded(function(ok)
 end)
 
 _G.__umtClaim = nil
-print("[UMT] umt toolkit v2.1.7 loaded — reset credit on enable (no free burst at init)")
-notify("umt toolkit", "v2.1.7 — init-safe", "success")
+print("[UMT] umt toolkit v2.1.9 loaded — smart = hardness-ratio rate-limit emulation")
+notify("umt toolkit", "v2.1.9 — hardness ratio", "success")
