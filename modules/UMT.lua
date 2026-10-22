@@ -1190,21 +1190,25 @@ do
 	local tab = mod:Tab({ Name = "fastmine" })
 	local sec = tab:Section("static")
 
-	-- smart mode = static baseline + idle bonus.
-	-- Server rate limit allows continuous mining at vanilla pace (= 1x). Static
-	-- mode cheats slightly below that (0.75x) which server tolerates.
-	-- Smart: starts from static baseline, then subtracts REAL idle time
-	-- (gap minus previous mine's reserved duration) to reach up to burstMult floor.
-	--   actual = max(vanilla × burstMult, vanilla × mult − idle)
-	--   idle = max(0, gap − prevActual − pollBaseline)
-	-- No persistent credit, each hook call self-contained.
-	-- v2.1.3: subtracts prevActual so continuous mining doesn't look like pause.
+	-- smart mode = token bucket distributing accumulated idle across multiple blocks.
+	-- Credit grows during idle (gap > prev mine duration + poll cushion).
+	-- Each mine spends up to (base - floor) credit, reducing actual block time.
+	-- Rest of credit stays in bucket for next blocks → bursts last multiple blocks.
+	--   credit += max(0, gap - prevActual - pollBaseline)
+	--   burst = min(credit, base - vanilla × burstMult)
+	--   actual = base - burst; credit -= burst
+	-- Continuous mining → credit stays 0 → actual = base = static-like speedup.
+	-- Short pause → credit small → one slightly-faster block.
+	-- Long idle → credit big → many blocks at burst floor until drained.
+	-- v2.1.5: token bucket with burstFloor configurable in UI.
 	local state = {
 		active        = false,
 		mode          = "static",
 		mult          = 0.75,         -- static multiplier (also smart baseline)
-		burstMult     = 0.002,        -- smart: floor (max burst = 500x; vanilla × 0.002 = 10ms for 5s block)
+		burstMult     = 0.001,        -- smart: floor (max burst = 1000x; vanilla × 0.001 = 5ms for 5s block)
 		pollBaseline  = 0.1,          -- smart: human-reaction cushion before idle counts
+		credit        = 0,            -- smart: accumulated idle budget (seconds)
+		cap           = 60,           -- smart: credit cap (so burst isn't infinite after very long AFK)
 		lastCall      = 0,            -- smart: tick() of last MTF call
 		prevActual    = 0,            -- smart: previous mine's returned duration
 		lastVanilla   = 1,            -- smart: UI
@@ -1230,14 +1234,20 @@ do
 				state.lastCall = now
 				state.lastGap = gap
 
-				-- idle = time since previous mine completed (gap minus its duration)
-				-- minus small cushion for human reaction
+				-- deposit this call's idle (beyond prev mine duration) into credit bucket
 				local idle = math.max(0, gap - state.prevActual - state.pollBaseline)
+				state.credit = math.min(state.credit + idle, state.cap)
 				state.lastIdle = idle
 
-				-- base = vanilla × mult (same as static); idle subtracts further seconds
+				-- spend up to (base - floor) credit on this block
 				local base = vanilla * state.mult
-				local actual = math.max(vanilla * state.burstMult, base - idle)
+				local floor = vanilla * state.burstMult
+				local maxBurst = base - floor
+				local burst = math.min(state.credit, math.max(0, maxBurst))
+				state.credit = state.credit - burst
+
+				local actual = base - burst
+				if actual < floor then actual = floor end
 
 				state.prevActual = actual
 				state.lastMult = (actual > 0) and (vanilla / actual) or 1
@@ -1282,11 +1292,14 @@ do
 				notify("fastmine smart", "auto rate", "success")
 			else disable() end
 		end })
-	sec2:Label("static baseline + idle bonus. idle = (gap − prev mine duration − 0.1s)")
+	sec2:Label("token bucket: idle → credit → spread across next mines")
 	local fmBurst = sec2:Number("fastmine_burst_floor", { Label = "burst floor (vanilla × this)",
-		Default = 0.002, Min = 0.001, Max = 0.5, Step = 0.001,
+		Default = 0.001, Min = 0.0005, Max = 0.5, Step = 0.0005,
 		Callback = function(v) state.burstMult = v end })
-	local liveLbl = sec2:Label("gap: 0.00s   idle: 0.00s   vanilla: 1.0s   speedup: 1.00x")
+	local fmCap = sec2:Number("fastmine_credit_cap", { Label = "credit cap (seconds)",
+		Default = 60, Min = 5, Max = 300, Step = 5,
+		Callback = function(v) state.cap = v end })
+	local liveLbl = sec2:Label("credit: 0.0s / 60s   gap: 0.00s   vanilla: 1.0s   speedup: 1.00x")
 
 	local RS = game:GetService("RunService")
 	if _G.__umt_fastmine_live then pcall(function() _G.__umt_fastmine_live:Disconnect() end) end
@@ -1303,13 +1316,19 @@ do
 			local lv  = tonumber(state.lastVanilla) or 1
 			local lm  = tonumber(state.lastMult) or 1
 			local pa  = tonumber(state.prevActual) or 0
-			local liveIdle = math.max(0, g - pa - state.pollBaseline)
+			local cr  = tonumber(state.credit) or 0
+			local cap = tonumber(state.cap) or 60
+			-- live credit = stored + what next call would add
+			local liveAdd = math.max(0, g - pa - state.pollBaseline)
+			local liveCr  = math.min(cr + liveAdd, cap)
 			local base = lv * state.mult
-			local nextActual = math.max(lv * state.burstMult, base - liveIdle)
+			local floor = lv * state.burstMult
+			local burst = math.min(liveCr, math.max(0, base - floor))
+			local nextActual = math.max(floor, base - burst)
 			local nextSpeedup = (nextActual > 0) and (lv / nextActual) or 1
 			pcall(function()
-				liveLbl:Set(string.format("gap: %.2fs   idle: %.2fs   vanilla: %.1fs   next: %.2fx   last: %.2fx",
-					g, liveIdle, lv, nextSpeedup, lm))
+				liveLbl:Set(string.format("credit: %.1fs / %.0fs   gap: %.2fs   vanilla: %.1fs   next: %.2fx   last: %.2fx",
+					liveCr, cap, g, lv, nextSpeedup, lm))
 			end)
 		end
 		if tick() - lastDiag > 2 then
@@ -1319,8 +1338,9 @@ do
 			local lm = tonumber(state.lastMult) or 0
 			local li = tonumber(state.lastIdle) or 0
 			local pa = tonumber(state.prevActual) or 0
-			print(string.format("[fastmine] active=%s mode=%s gap=%.2fs idle=%.2fs vanilla=%.2fs prev=%.2fs lastSpeedup=%.2f",
-				tostring(state.active), tostring(state.mode), g, li, lv, pa, lm))
+			local cr = tonumber(state.credit) or 0
+			print(string.format("[fastmine] active=%s mode=%s credit=%.2fs gap=%.2fs idle=%.2fs vanilla=%.2fs prev=%.2fs speedup=%.2f",
+				tostring(state.active), tostring(state.mode), cr, g, li, lv, pa, lm))
 		end
 	end)
 	registerTeardown(function()
@@ -1472,5 +1492,5 @@ mod:OnConfigLoaded(function(ok)
 end)
 
 _G.__umtClaim = nil
-print("[UMT] umt toolkit v2.1.4 loaded — burst floor configurable (0.002 default = 500x cap)")
-notify("umt toolkit", "v2.1.4 — burst floor slider", "success")
+print("[UMT] umt toolkit v2.1.5 loaded — token bucket smart fastmine (credit spreads across blocks)")
+notify("umt toolkit", "v2.1.5 — token bucket", "success")
